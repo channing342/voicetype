@@ -1,6 +1,8 @@
 """macOS 系統互動：剪貼簿貼上、讀取選取文字、目前 App 與視窗資訊。"""
+import subprocess
 import time
 
+import objc
 from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSWorkspace
 import ApplicationServices as AX
 import Quartz
@@ -102,3 +104,35 @@ def frontmost_context(include_input=False):
         value = _ax(el, AX.kAXValueAttribute) if el else None
         ctx["input_field"] = str(value)[-2000:] if isinstance(value, str) else ""
     return ctx
+
+
+# 系統設定 →「隱私權與安全性」各頁的網址
+PRIVACY_PANES = {"accessibility": "Privacy_Accessibility", "input": "Privacy_ListenEvent",
+                 "microphone": "Privacy_Microphone"}
+_av = {}
+
+
+def _capture_device():
+    """AVFoundation 只為了查麥克風權限，用 loadBundle 載入就好，不另外裝 pyobjc-framework-AVFoundation。"""
+    if not _av:
+        objc.loadBundle("AVFoundation", _av, bundle_path="/System/Library/Frameworks/AVFoundation.framework")
+    return _av["AVCaptureDevice"]
+
+
+def permissions():
+    """快捷鍵靠 event tap，要「輔助使用」；錄音要「麥克風」。麥克風還沒問過時是 None。"""
+    mic = _capture_device().authorizationStatusForMediaType_("soun")  # 0 未決定、1 受限、2 拒絕、3 允許
+    return {"accessibility": bool(AX.AXIsProcessTrusted()), "input": bool(Quartz.CGPreflightListenEventAccess()),
+            "microphone": None if mic == 0 else mic == 3}
+
+
+def request_permissions():
+    """跳出系統的授權對話框（已允許或已拒絕過的不會再跳）。"""
+    AX.AXIsProcessTrustedWithOptions({AX.kAXTrustedCheckOptionPrompt: True})
+    Quartz.CGRequestListenEventAccess()
+    if permissions()["microphone"] is None:
+        _capture_device().requestAccessForMediaType_completionHandler_("soun", lambda granted: None)
+
+
+def open_privacy(key):
+    subprocess.run(["open", f"x-apple.systempreferences:com.apple.preference.security?{PRIVACY_PANES[key]}"])

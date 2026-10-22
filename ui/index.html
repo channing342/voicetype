@@ -5,19 +5,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Voicetype</title>
 <style>
+/* 主題：預設跟隨系統，側欄可固定成淺色或深色（data-theme） */
 :root {
-  --bg: #eef0f3; --panel: #ffffff; --panel-2: #f6f7f9; --line: #e2e5ea;
-  --text: #1c1f24; --muted: #6b7280; --faint: #9aa1ab;
-  --accent: #2563eb; --accent-soft: #e7eefc; --danger: #dc2626; --warn: #b45309;
-  --wave: #c3c8d0; --wave-played: #1c1f24;
+  --bg: #ffffff; --side: #f3f4f6; --raise: #ffffff; --panel: #f3f4f6; --panel-2: #e9ebee; --line: #e1e3e7;
+  --text: #121315; --muted: #5d636c; --faint: #9399a2; --dot: #e3e5e9;
+  --accent: #2f6bff; --accent-soft: #e6eeff; --danger: #d92d20; --warn: #b54708; --ok: #12873d;
+  --wave: #c3c8d0; --wave-played: #121315;
+  --key-bg: #ffffff; --key-line: #1d1f22; --key-text: #121315;
+  --tint-a: linear-gradient(135deg, #e3edff, #f1f5ff); --tint-b: linear-gradient(135deg, #ece6ff, #f6f2ff);
+  --shadow: 0 1px 2px rgba(16,24,40,.06);
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17191d; --panel: #1f2227; --panel-2: #262a30; --line: #30353c;
-    --text: #e8eaed; --muted: #9aa1ab; --faint: #6b7280;
-    --accent: #6c9cff; --accent-soft: #1f2b44; --danger: #f87171; --warn: #fbbf24;
-    --wave: #4a505a; --wave-played: #e8eaed;
+  :root:not([data-theme="light"]) {
+    --bg: #0e0f11; --side: #1b1c1f; --raise: #26272b; --panel: #26272b; --panel-2: #303136; --line: #34363b;
+    --text: #f3f4f6; --muted: #a3a8b0; --faint: #6c7179; --dot: #24262a;
+    --accent: #6b97ff; --accent-soft: #1d2a47; --danger: #f87171; --warn: #fbbf24; --ok: #4ade80;
+    --wave: #4a505a; --wave-played: #f3f4f6;
+    --key-bg: #141518; --key-line: #e9eaec; --key-text: #f3f4f6;
+    --tint-a: linear-gradient(135deg, #22324d, #1a2130); --tint-b: linear-gradient(135deg, #342b4d, #221e30);
+    --shadow: none;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #0e0f11; --side: #1b1c1f; --raise: #26272b; --panel: #26272b; --panel-2: #303136; --line: #34363b;
+  --text: #f3f4f6; --muted: #a3a8b0; --faint: #6c7179; --dot: #24262a;
+  --accent: #6b97ff; --accent-soft: #1d2a47; --danger: #f87171; --warn: #fbbf24; --ok: #4ade80;
+  --wave: #4a505a; --wave-played: #f3f4f6;
+  --key-bg: #141518; --key-line: #e9eaec; --key-text: #f3f4f6;
+  --tint-a: linear-gradient(135deg, #22324d, #1a2130); --tint-b: linear-gradient(135deg, #342b4d, #221e30);
+  --shadow: none;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
@@ -40,17 +56,90 @@ input[type=text], input[type=search], select {
   border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 10px; outline: none;
 }
 input:focus { border-color: var(--accent); }
+main > .card, main > div > .card { box-shadow: var(--shadow); }
 
 nav {
-  width: 168px; padding: 16px 10px; display: flex; flex-direction: column; gap: 4px;
-  border-right: 1px solid var(--line);
+  width: 216px; flex: none; padding: 18px 12px 14px; display: flex; flex-direction: column; gap: 4px;
+  background: var(--side);
 }
-nav .brand { font-weight: 600; font-size: 16px; padding: 4px 10px 14px; }
+nav .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px; padding: 2px 10px 18px; }
+nav .brand svg { color: var(--accent); }
 nav a {
-  padding: 7px 10px; border-radius: 8px; color: var(--muted); cursor: pointer; text-decoration: none;
+  display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 10px;
+  color: var(--muted); cursor: pointer; text-decoration: none; font-size: 15px;
 }
-nav a.on { background: var(--panel); color: var(--text); font-weight: 500; }
-nav .foot { margin-top: auto; padding: 0 10px; font-size: 12px; color: var(--faint); }
+nav a svg { flex: none; }
+nav a:hover { color: var(--text); }
+nav a.on { background: var(--panel-2); color: var(--text); font-weight: 600; }
+nav .foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
+.side-card { background: var(--raise); border-radius: 14px; padding: 12px 14px; font-size: 13px; }
+.side-card .k { color: var(--muted); }
+.side-card .v { font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; }
+.side-card .v:last-child { margin-bottom: 0; }
+.theme { display: flex; background: var(--raise); border-radius: 10px; padding: 3px; }
+.theme button { flex: 1; border: none; background: none; border-radius: 8px; padding: 4px 0; font-size: 12px; color: var(--muted); }
+.theme button.on { background: var(--side); color: var(--text); }
+.dot-ok, .dot-bad { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.dot-ok { background: var(--ok); } .dot-bad { background: var(--danger); }
+
+/* 首頁 */
+#home { overflow-y: auto; gap: 28px; padding: 0 28px 28px 36px; align-items: flex-start;
+  background-image: radial-gradient(var(--dot) 1px, transparent 1px); background-size: 14px 14px; }
+.hcenter { flex: 1; min-width: 0; max-width: 760px; }
+.hright { width: 268px; flex: none; display: flex; flex-direction: column; gap: 16px; padding-top: 112px; }
+#home h1 { font-size: 46px; line-height: 1.1; letter-spacing: -0.5px; margin: 34px 0 30px; font-weight: 800; }
+.modes { background: var(--panel); border-radius: 22px; padding: 6px 26px; box-shadow: var(--shadow); }
+.mrow { display: flex; align-items: center; gap: 18px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.mrow:last-child { border-bottom: none; }
+.mrow .what { flex: 1; min-width: 0; }
+.mrow .name { font-weight: 700; font-size: 16px; }
+.mrow .desc { color: var(--muted); font-size: 14px; }
+.mrow .msg { font-size: 12px; margin-top: 2px; min-height: 0; }
+.mrow .msg.bad { color: var(--danger); } .mrow .msg.good { color: var(--ok); }
+.keys { width: 260px; flex: none; display: flex; align-items: center; gap: 10px; }
+.keybtn { display: flex; gap: 8px; border: none; background: none; padding: 4px; border-radius: 12px; }
+.keybtn:hover { background: var(--panel-2); }
+.kcap {
+  min-width: 42px; height: 42px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--key-line); border-radius: 9px; background: var(--key-bg); color: var(--key-text);
+  font-size: 19px; font-weight: 600;
+}
+.listening {
+  height: 42px; display: inline-flex; align-items: center; padding: 0 14px; border-radius: 9px;
+  border: 1.5px dashed var(--accent); color: var(--accent); background: var(--accent-soft); font-size: 14px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse { 50% { opacity: .55; } }
+.link { border: none; background: none; padding: 2px 4px; color: var(--muted); font-size: 12px; }
+.link:hover { color: var(--text); background: none; }
+.alert {
+  border-radius: 18px; padding: 16px 20px; margin-bottom: 18px; background: var(--panel);
+  border: 1.5px solid var(--danger);
+}
+.alert h3 { margin: 0 0 4px; font-size: 15px; }
+.alert p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.alert .row { margin: 0; flex-wrap: wrap; }
+#home h2 { font-size: 20px; margin: 34px 0 14px; }
+.cases { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.case { background: var(--panel); border-radius: 20px; padding: 18px 20px; box-shadow: var(--shadow); }
+.case .ic {
+  width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-bottom: 12px;
+}
+.case .name { font-weight: 700; font-size: 16px; margin-bottom: 4px; }
+.case .desc { color: var(--muted); font-size: 14px; }
+.stats { background: var(--panel); border-radius: 20px; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; box-shadow: var(--shadow); }
+.stat { display: flex; align-items: center; gap: 12px; }
+.stat svg { color: var(--muted); flex: none; }
+.stat b { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 13px; }
+.tcard { border-radius: 20px; padding: 18px 20px; cursor: default; }
+.tcard.a { background: var(--tint-a); } .tcard.b { background: var(--tint-b); }
+.tcard h3 { margin: 0 0 6px; font-size: 16px; }
+.tcard p { margin: 0; color: var(--muted); font-size: 13px; }
+.tcard .perm { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; font-size: 14px; }
+.tcard .perm button { padding: 2px 10px; font-size: 12px; }
+.tcard.click { cursor: pointer; }
 
 main { flex: 1; display: none; min-width: 0; }
 main.on { display: flex; }
@@ -149,12 +238,31 @@ main.on { display: flex; }
 </head>
 <body>
 <nav>
-  <div class="brand">Voicetype</div>
-  <a data-tab="history">歷史紀錄</a>
-  <a data-tab="vocab">詞彙管理</a>
-  <a data-tab="settings">設定</a>
-  <div class="foot" id="retention"></div>
+  <div class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"/></svg>Voicetype</div>
+  <a data-tab="home"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 10.5 12 4l8 6.5V20h-5v-6H9v6H4z"/></svg>首頁</a>
+  <a data-tab="history"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>歷史紀錄</a>
+  <a data-tab="vocab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 4h11a1 1 0 0 1 1 1v15H7a2 2 0 0 1-2-2V6a2 2 0 0 1 1-2z"/><path d="M5 18a2 2 0 0 1 2-2h11"/></svg>詞彙管理</a>
+  <a data-tab="settings"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>設定</a>
+  <div class="foot">
+    <div class="side-card" id="sideStatus"></div>
+    <div class="theme" id="theme"><button data-t="">系統</button><button data-t="light">淺色</button><button data-t="dark">深色</button></div>
+  </div>
 </nav>
+
+<main id="home">
+  <div class="hcenter">
+    <h1>說話，不用打字</h1>
+    <div id="permAlert"></div>
+    <div class="modes" id="modes"></div>
+    <h2>依 App 自動調整語氣</h2>
+    <div class="cases" id="cases"></div>
+  </div>
+  <div class="hright">
+    <div class="stats" id="stats"></div>
+    <div class="tcard a" id="permCard"></div>
+    <div class="tcard b click" id="asrCard" title="切換辨識模型"></div>
+  </div>
+</main>
 
 <main id="history">
   <div class="toolbar"><input id="q" type="search" placeholder="搜尋整理後文字或原文"></div>
@@ -222,10 +330,11 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const fmtTime = (t) => new Date(t * 1000).toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 
+const TABS = ["home", "history", "vocab", "settings"];
 function showTab(tab) {
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("on", a.dataset.tab === tab));
   document.querySelectorAll("main").forEach((m) => m.classList.toggle("on", m.id === tab));
-  if (tab === "vocab") loadVocab(); else if (tab === "settings") loadAsr(); else refresh();
+  if (tab === "home") loadHome(); else if (tab === "vocab") loadVocab(); else if (tab === "settings") loadAsr(); else refresh();
 }
 document.querySelectorAll("nav a").forEach((a) => a.onclick = () => showTab(a.dataset.tab));
 
@@ -434,8 +543,106 @@ function pollAsr() {
   }, 1000);
 }
 
-call("settings").then((s) => $("#retention").textContent = `紀錄保留 ${s.history_days} 天`);
-showTab(["vocab", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "history");
+/* ---------- 首頁：快捷鍵錄製、權限、統計 ---------- */
+const DESC = {
+  clean: "口語 → 乾淨文字，只去贅字、補標點",
+  organize: "零散想法 → 有條理的段落或條列",
+  edit: "先選取文字，再說出要怎麼改",
+  window: "隨時叫出這個視窗",
+};
+const PERMS = [["accessibility", "輔助使用", "快捷鍵與貼上"], ["input", "輸入監控", "攔截快捷鍵"], ["microphone", "麥克風", "錄音"]];
+const MODS = { "⌃": "Control", "⌥": "Option", "⇧": "Shift", "⌘": "Command" };
+let home = null, homePoll, capturing = null;
+const msgs = {};
+const keycaps = (label) => {
+  const mods = [...label].filter((c) => MODS[c]), rest = [...label].filter((c) => !MODS[c]).join("");
+  return [...mods.map((m) => `<span class="kcap" title="${MODS[m]}">${m}</span>`), rest && `<span class="kcap">${esc(rest)}</span>`].join("");
+};
+const fmtMin = (sec) => sec >= 3600 ? [(sec / 3600).toFixed(1), "小時"] : [Math.round(sec / 60), "分鐘"];
+const STAT_IC = {
+  clock: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
+  bolt: '<path d="M13 3 5 14h6l-1 7 8-11h-6z"/>',
+  hour: '<path d="M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9"/>',
+  check: '<circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
+};
+const stat = (ic, v, unit) => `<div class="stat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STAT_IC[ic]}</svg><b>${v}</b><span>${unit}</span></div>`;
+
+function renderHome(h) {
+  home = h;
+  capturing = h.capturing;
+  const missing = PERMS.filter(([k]) => h.permissions[k] !== true);
+  $("#permAlert").innerHTML = h.hotkeys_active ? "" : `
+    <div class="alert">
+      <h3>快捷鍵還沒啟用</h3>
+      <p>macOS 需要允許「輔助使用」，Voicetype 才能攔截快捷鍵並把文字貼到其他 App。到「系統設定 → 隱私權與安全性 → 輔助使用」把 Voicetype 執行的程式（終端機，或 LaunchAgent 用的 python）打開；允許後幾秒內會自動啟用，沒有的話按「重新啟動」。</p>
+      <div class="row"><button class="primary" data-open="accessibility">打開輔助使用設定</button><button id="askPerm">再次請求授權</button><button id="restart">重新啟動 Voicetype</button></div>
+    </div>`;
+  $("#modes").innerHTML = ["clean", "organize", "edit", "window"].map((m) => {
+    const hk = h.hotkeys[m], def = h.defaults[m], m_ = msgs[m];
+    const changed = hk.keycode !== def.keycode || [...hk.mods].sort().join() !== [...def.mods].sort().join();
+    return `<div class="mrow">
+      <div class="what"><div class="name">${esc(h.modes[m])}</div><div class="desc">${DESC[m]}</div>
+        ${m_ ? `<div class="msg ${m_.ok ? "good" : "bad"}">${esc(m_.text)}</div>` : ""}</div>
+      <div class="keys">${capturing === m
+        ? `<span class="listening">請按下新的快捷鍵…</span><button class="link" data-cancel>取消</button>`
+        : `<button class="keybtn" data-cap="${m}" title="點一下重新錄製">${keycaps(hk.label)}</button>
+           ${changed ? `<button class="link" data-reset="${m}" title="恢復預設 ${esc(def.label)}">恢復預設</button>` : ""}`}</div>
+    </div>`;
+  }).join("");
+  $("#cases").innerHTML = h.styles.map((s) => `<div class="case"><div class="ic">${esc(s.name[0])}</div><div class="name">${esc(s.name)}</div><div class="desc">${esc(s.style)}</div></div>`).join("");
+  const st = h.stats, [mv, mu] = fmtMin(st.seconds), [sv, su] = fmtMin(st.saved);
+  $("#stats").innerHTML = stat("clock", mv, `${mu}錄音`) + stat("mic", st.chars.toLocaleString(), "字") + stat("bolt", st.cpm, "字／分鐘")
+    + stat("hour", sv, `${su}省下`) + stat("check", st.ok_rate == null ? "—" : st.ok_rate + "%", "DGX 成功率");
+  $("#permCard").innerHTML = `<h3>權限</h3>` + PERMS.map(([k, name, why]) => {
+    const v = h.permissions[k];
+    return `<div class="perm" title="${why}"><span><span class="${v ? "dot-ok" : "dot-bad"}"></span>${name}</span>${v ? '<span class="meta">已允許</span>' : `<button data-open="${k}">前往設定</button>`}</div>`;
+  }).join("") + (missing.length ? "" : `<p>快捷鍵${h.hotkeys_active ? "運作中" : "尚未啟用"}</p>`);
+  $("#asrCard").innerHTML = `<h3>辨識模型</h3><p>${esc(h.asr.name)}${h.asr.loading ? "（載入中…）" : h.asr.error ? "（載入失敗）" : ""}</p>`;
+  $("#sideStatus").innerHTML = `<div class="k">快捷鍵</div><div class="v"><span class="${h.hotkeys_active ? "dot-ok" : "dot-bad"}"></span>${h.hotkeys_active ? "已啟用" : "未啟用"}</div>
+    <div class="k">開啟管理介面</div><div class="v">${esc(h.hotkeys.window.label)}</div>
+    <div class="k">紀錄保留</div><div class="v">${h.history_days} 天</div>`;
+
+  document.querySelectorAll("[data-cap]").forEach((b) => b.onclick = async () => {
+    delete msgs[b.dataset.cap];
+    try { await call("hotkey_capture", b.dataset.cap); } catch (e) { msgs[b.dataset.cap] = { ok: false, text: e.message.replace(/^RuntimeError\('|'\)$/g, "") }; }
+    loadHome();
+  });
+  document.querySelectorAll("[data-cancel]").forEach((b) => b.onclick = async () => { await call("hotkey_cancel"); loadHome(); });
+  document.querySelectorAll("[data-reset]").forEach((b) => b.onclick = async () => {
+    const m = b.dataset.reset;
+    try { renderHome(await call("hotkey_reset", m)); msgs[m] = { ok: true, text: "已恢復預設" }; }
+    catch (e) { msgs[m] = { ok: false, text: e.message.replace(/^ValueError\('|'\)$/g, "") }; }
+    loadHome();
+  });
+  document.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => call("open_privacy", b.dataset.open));
+  $("#askPerm") && ($("#askPerm").onclick = () => call("permissions_request"));
+  $("#restart") && ($("#restart").onclick = () => call("restart"));
+}
+async function loadHome() {
+  clearTimeout(homePoll);
+  renderHome(await call("home"));
+  // 授權、模型載入都在外部發生，停在首頁時定期更新
+  homePoll = setTimeout(() => document.querySelector("#home.on") && loadHome(), capturing ? 700 : 2000);
+}
+window.captureDone = (r) => {
+  if (capturing) msgs[capturing] = r.message ? { ok: r.ok, text: r.message } : undefined;
+  loadHome();
+};
+$("#asrCard").onclick = () => showTab("settings");
+
+/* 主題 */
+function setTheme(t) {
+  if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  document.querySelectorAll("#theme button").forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+  try { localStorage.setItem("theme", t); } catch (e) {}
+  drawWave();
+}
+document.querySelectorAll("#theme button").forEach((b) => b.onclick = () => setTheme(b.dataset.t));
+let savedTheme = ""; try { savedTheme = localStorage.getItem("theme") || ""; } catch (e) {}
+setTheme(savedTheme);
+
+showTab(TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "home");
 </script>
 </body>
 </html>

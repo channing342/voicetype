@@ -232,6 +232,51 @@ def test_recorder_stop_right_after_start_still_closes_mic(monkeypatch):
 
 # ---------- 歷史紀錄 ----------
 
+def test_history_stats(tmp_path):
+    h = History(tmp_path)
+    assert h.stats() == {"count": 0, "seconds": 0, "chars": 0, "ok": 0}
+    h.add(np.zeros(10, np.float32), duration=30, raw="a", text="你好 世界", ok=1)
+    h.add(np.zeros(10, np.float32), duration=90, raw="b", text="OK", ok=0)
+    assert h.stats() == {"count": 2, "seconds": 120, "chars": 6, "ok": 1}
+
+
+def test_api_home_and_hotkey_reset(tmp_path):
+    from window import Api
+
+    class System:
+        capturing, changed, captured = None, 0, None
+
+        def status(self):
+            return {"permissions": {"accessibility": True}, "hotkeys_active": True, "capturing": self.capturing}
+
+        def capture(self, mode):
+            self.capturing = mode
+
+        def hotkeys_changed(self):
+            self.changed += 1
+
+    cfg, sysm = cfg_with(), System()
+    h = History(tmp_path)
+    h.add(np.zeros(10, np.float32), duration=60, raw="x", text="一二三四五六七八", ok=1)
+    api = Api(h, lambda: cfg, config_path=tmp_path / "c.json", system=sysm)
+    home = api.call("home", [])["result"]
+    assert home["stats"]["cpm"] == 8 and home["stats"]["ok_rate"] == 100 and home["stats"]["saved"] == 0
+    assert home["hotkeys_active"] and home["asr"]["name"] == "Whisper Large V3 Turbo"
+    assert [s["name"] for s in home["styles"]] == ["郵件", "聊天", "終端機／IDE"]
+    api.call("hotkey_capture", ["organize"])
+    assert api.call("home", [])["result"]["capturing"] == "organize"
+    api.call("hotkey_cancel", [])
+    assert sysm.capturing is None
+
+    cfg["hotkeys"]["clean"] = {"keycode": 0, "mods": ["cmd"], "label": "⌘A"}
+    cfg["hotkeys"]["edit"] = {"keycode": 43, "mods": ["cmd"], "label": "⌘,"}  # 佔用清理的預設鍵
+    r = api.call("hotkey_reset", ["clean"])
+    assert not r["ok"] and "編輯" in r["error"] and cfg["hotkeys"]["clean"]["label"] == "⌘A"
+    assert api.call("hotkey_reset", ["edit"])["ok"] and cfg["hotkeys"]["edit"]["label"] == "⌘;"
+    assert api.call("hotkey_reset", ["clean"])["ok"] and cfg["hotkeys"]["clean"]["label"] == "⌘,"
+    assert sysm.changed == 2 and json.loads((tmp_path / "c.json").read_text())["hotkeys"]["clean"]["keycode"] == 43
+
+
 def test_history_add_list_search_update_delete_purge(tmp_path):
     h = History(tmp_path)
     audio = (0.1 * np.ones(core.SAMPLE_RATE, np.float32))
@@ -310,6 +355,12 @@ def test_paste_restores_clipboard_and_marks_transient(monkeypatch):
         pb.clearContents()
         if original:
             pb.setString_forType_(original, NSPasteboardTypeString)
+
+
+def test_permissions_shape():
+    import macos
+    p = macos.permissions()
+    assert set(p) == {"accessibility", "input", "microphone"} and p["microphone"] in (True, False, None)
 
 
 def test_frontmost_context_has_app():
@@ -429,6 +480,20 @@ class FakeRec:
         return Done(self.audio if self.audio is not None else np.zeros(0, np.float32))
 
 
+class FakeListener:
+    def __init__(self, alive=True):
+        self.alive, self.stopped = alive, False
+
+    def is_alive(self):
+        return self.alive
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self.stopped = True
+
+
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     import queue
@@ -440,8 +505,10 @@ def app(tmp_path, monkeypatch):
     a.ctx_thread = threading.Thread()
     a.keys = core.KeyLogic(0.4)
     a.rec, a.history, a.purged, a.jobs = FakeRec(), History(tmp_path), 0.0, queue.Queue()
-    a.win = type("W", (), {"js": lambda self, code: None, "show": lambda self, tab: None})()
-    a.notes = []
+    a.js_calls, a.notes = [], []
+    a.win = type("W", (), {"js": lambda self, code: a.js_calls.append(code), "show": lambda self, tab: None,
+                           "visible": lambda self: False})()
+    a.listener, a.tap_disabled, a.tap_checked = FakeListener(), False, 0.0
     monkeypatch.setattr(voicetype.rumps, "notification", lambda *x: a.notes.append(x))
     monkeypatch.setattr(voicetype, "save_config", lambda cfg: None)
     monkeypatch.setattr(a, "build_menu", lambda: None, raising=False)
@@ -468,6 +535,36 @@ def test_app_hotkey_capture_defers_to_main_thread(app, monkeypatch):
     assert app.cfg["hotkeys"]["clean"]["mods"] == ["cmd", "shift"] and app.notes[0][1] == "已更新"
     app.save_capture("clean", 47, core.MOD_FLAGS["cmd"], ".")  # 重複就不改
     assert app.cfg["hotkeys"]["clean"]["keycode"] == 0 and app.notes[1][1] == "未變更"
+    assert app.js_calls[0].startswith('captureDone({"ok": true') and '"ok": false' in app.js_calls[1]
+
+
+def test_app_capture_needs_running_listener(app):
+    app.capture("edit")
+    assert app.capturing == "edit"
+    app.capturing, app.listener = None, FakeListener(alive=False)
+    with pytest.raises(RuntimeError, match="輔助使用"):
+        app.capture("edit")
+    assert app.capturing is None
+
+
+def test_app_restarts_listener_after_permission_or_tap_disabled(app, monkeypatch):
+    """沒權限時 pynput 的執行緒直接結束；授權後或 tap 被系統停用時，要自己重建。"""
+    import Quartz
+    import voicetype
+    started, perms = [], {"accessibility": False}
+    monkeypatch.setattr(voicetype.macos, "permissions", lambda: dict(perms))
+    monkeypatch.setattr(voicetype.keyboard, "Listener", lambda **kw: started.append(kw) or FakeListener())
+    app.listener = dead = FakeListener(alive=False)
+    app.watch_listener(100)
+    assert started == []  # 還沒授權，不要一直重建
+    perms["accessibility"] = True
+    app.watch_listener(101)
+    assert started == []  # 間隔不到 TAP_CHECK 不檢查
+    app.watch_listener(103)
+    assert len(started) == 1 and dead.stopped and app.listener.is_alive()
+    assert app.intercept(Quartz.kCGEventTapDisabledByTimeout, None) is None and app.tap_disabled
+    app.watch_listener(106)
+    assert len(started) == 2 and not app.tap_disabled
 
 
 def test_app_hotkey_and_esc_flow(app):

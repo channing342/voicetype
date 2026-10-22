@@ -1,6 +1,9 @@
 """Voicetype：本地語音輸入。快捷鍵錄音 → mlx 辨識 → DGX LLM 整理 → 貼到目前 App。"""
+import json
+import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 
@@ -23,6 +26,7 @@ ICONS = {"idle": "🎙", "recording": "🔴", "busy": "⏳", "paused": "⏸"}
 STAGES = {"transcribe": "辨識中…", "llm": "DGX 整理中…"}
 FAST, SLOW = 1 / 30, 0.5  # 有畫面要動時 30fps；閒置時 2 次/秒，避免空轉吃 CPU
 PURGE_EVERY = 3600  # 常駐不重開，每小時刪一次過期紀錄
+TAP_CHECK = 2  # 每 2 秒檢查 event tap 是否還活著
 
 
 class App(rumps.App):
@@ -30,22 +34,33 @@ class App(rumps.App):
         super().__init__("Voicetype", title=ICONS["idle"], quit_button=None)
         NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory：不顯示 Dock 圖示
         self._edit_menu()
+        first_run = not CONFIG_PATH.exists()
         self.cfg = load_config()
         self.state, self.mode, self.capturing, self.last_text = "idle", None, None, ""
         self.ctx, self.stage, self.stage_start, self.flash = {}, None, 0.0, ("", 0.0)
         self.ctx_thread = threading.Thread()
         self.keys = KeyLogic(self.cfg["hold_threshold"])
         self.rec, self.hud, self.history, self.purged = Recorder(), Hud(), History(), 0.0
+        self.listener, self.tap_disabled, self.tap_checked = None, False, 0.0
         # ponytail: MLX 的 GPU stream 綁執行緒，所有辨識都在同一條 worker 執行
         self.jobs = queue.Queue()
         self.switch_asr()  # 預熱模型（也設定 asr_state，要在 Api 之前）
         self.win = MainWindow(Api(self.history, lambda: self.cfg, copy=macos.copy_text,
-                                  on_asr_change=self.switch_asr, asr_status=lambda: dict(self.asr_state)))
+                                  on_asr_change=self.switch_asr, asr_status=lambda: dict(self.asr_state),
+                                  system=self))
         self.build_menu()
         self.timer = rumps.Timer(self.tick, SLOW)
         self.timer.start()
-        keyboard.Listener(darwin_intercept=self.intercept).start()
+        self.start_listener()
         threading.Thread(target=self.worker, daemon=True).start()
+        # 選單列圖示可能被瀏海或其他圖示擠掉，啟動時直接打開管理介面，不依賴快捷鍵；
+        # 開機自動啟動（install.sh 的 LaunchAgent 帶 VOICETYPE_AUTOSTART）則只在第一次或缺權限時打開，免得每天跳視窗
+        missing = not macos.permissions()["accessibility"]
+        if missing:
+            print("⚠️ 尚未允許「輔助使用」，快捷鍵不會生效；已打開管理介面", flush=True)
+            macos.request_permissions()
+        if first_run or missing or not os.environ.get("VOICETYPE_AUTOSTART"):
+            AppHelper.callAfter(self.win.show, "home")
 
     def _edit_menu(self):
         """Accessory App 沒有主選單，WKWebView 裡的 ⌘C／⌘V／⌘A 需要 Edit 選單才會生效。"""
@@ -71,11 +86,9 @@ class App(rumps.App):
             item = rumps.MenuItem(name, callback=lambda _, k=key: self.set_cfg("hud_style", k))
             item.state = int(self.cfg["hud_style"] == key)
             hud_menu.add(item)
-        hotkey_menu = rumps.MenuItem("快捷鍵")
-        for m in ("clean", "organize", "edit", "window"):
-            hotkey_menu.add(rumps.MenuItem(f"錄製{MODE_NAMES[m]}快捷鍵（目前 {hk[m]['label']}）",
-                                           callback=lambda _, m=m: self.capture(m)))
         self.menu = [
+            rumps.MenuItem(f"打開 Voicetype（{hk['window']['label']}）", callback=lambda _: self.win.show("home")),
+            None,
             *[rumps.MenuItem(f"開始／結束錄音：{MODE_NAMES[m]}（{hk[m]['label']}）",
                              callback=lambda _, m=m: self.toggle(m)) for m in ("clean", "organize")],
             None,
@@ -84,7 +97,8 @@ class App(rumps.App):
             rumps.MenuItem("設定（辨識模型）…", callback=lambda _: self.win.show("settings")),
             rumps.MenuItem("重新貼上上一次結果", callback=lambda _: self.last_text and macos.paste(self.last_text)),
             None,
-            hotkey_menu, hud_menu, timeout_menu,
+            rumps.MenuItem("快捷鍵…", callback=lambda _: self.win.show("home")),
+            hud_menu, timeout_menu,
             rumps.MenuItem("暫停", callback=self.toggle_pause),
             None,
             rumps.MenuItem("開啟設定檔", callback=lambda _: subprocess.run(["open", "-t", str(CONFIG_PATH)])),
@@ -114,14 +128,52 @@ class App(rumps.App):
         self.state = "paused" if self.state == "idle" else "idle"
         sender.state = int(self.state == "paused")
 
+    # ---------- 管理介面（window.Api 的 system）：Api 在背景執行緒呼叫，碰 UI 的都要回主執行緒 ----------
+    def status(self):
+        return {"permissions": macos.permissions(), "hotkeys_active": self.listener.is_alive(),
+                "capturing": self.capturing}
+
     def capture(self, mode):
+        """下一個按鍵由 intercept 攔下，交給 save_capture 存檔。"""
+        if not self.listener.is_alive():
+            raise RuntimeError("快捷鍵功能還沒啟用，請先允許「輔助使用」權限")
         self.capturing = mode
-        rumps.notification("Voicetype", "", "請按下新的快捷鍵（需含修飾鍵，Esc 取消）")
+
+    def hotkeys_changed(self):
+        AppHelper.callAfter(self.build_menu)
+
+    def request_permissions(self):
+        AppHelper.callAfter(macos.request_permissions)
+
+    def open_privacy(self, key):
+        macos.open_privacy(key)
+
+    def restart(self):
+        """部分 macOS 版本授權後要重開才建得了 event tap。"""
+        AppHelper.callAfter(os.execv, sys.executable, [sys.executable, os.path.abspath(sys.argv[0])])
+
+    def start_listener(self):
+        if self.listener is not None:
+            self.listener.stop()
+        self.tap_disabled = False
+        self.listener = keyboard.Listener(darwin_intercept=self.intercept)
+        self.listener.start()
+
+    def watch_listener(self, now):
+        """沒權限時 event tap 建立失敗，pynput 的執行緒會直接結束且不重試；tap 被系統停用也不會自己恢復。
+        定期檢查，授權後不用重開 App 快捷鍵就會生效。"""
+        if now - self.tap_checked < TAP_CHECK:
+            return
+        self.tap_checked = now
+        if self.tap_disabled or (not self.listener.is_alive() and macos.permissions()["accessibility"]):
+            print("重新建立快捷鍵攔截", flush=True)
+            self.start_listener()
 
     # ---------- UI：rumps Timer 在主執行緒，所有畫面更新集中在這裡 ----------
     def tick(self, _):
         now = time.time()
         self.purge_history(now)
+        self.watch_listener(now)
         title = ICONS[self.state]
         if self.title != title:
             self.title = title
@@ -211,6 +263,9 @@ class App(rumps.App):
 
     # ---------- 按鍵：event tap 執行緒，必須立即返回；回傳 None = 吞掉 ----------
     def intercept(self, event_type, event):
+        if event_type in (Quartz.kCGEventTapDisabledByTimeout, Quartz.kCGEventTapDisabledByUserInput):
+            self.tap_disabled = True  # 不能在這裡重建，交給主執行緒的 watch_listener
+            return event
         if event_type not in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
             return event
         keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
@@ -243,7 +298,7 @@ class App(rumps.App):
             return event
         if mode == "window":
             if not repeat:
-                AppHelper.callAfter(self.win.show, "history")
+                AppHelper.callAfter(self.win.show, "home")
             return None
         if not repeat and self.state in ("idle", "recording"):
             action, m = self.keys.down(mode, keycode, now, self.state == "recording")
@@ -257,7 +312,8 @@ class App(rumps.App):
             self.cfg["hotkeys"][mode] = hk
             save_config(self.cfg)
             self.build_menu()
-        if msg:
+        self.win.js(f"captureDone({json.dumps({'ok': bool(hk), 'message': msg}, ensure_ascii=False)})")
+        if msg and not self.win.visible():  # 錄製到一半關掉視窗時，改用通知告知結果
             rumps.notification("Voicetype", "已更新" if hk else "未變更", msg)
 
     # ---------- worker：辨識 → DGX → 替換 → 貼上 → 存歷史 ----------

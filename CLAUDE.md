@@ -23,11 +23,12 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 模組分層：`core`（純邏輯，不 import AppKit）→ `macos` / `history` / `hud` / `window`（各自包一塊系統功能）→ `voicetype.App`（rumps）串起全部。import `voicetype` 不會啟動 App，測試用 `object.__new__(App)` 塞入需要的屬性，直接測方法（見 `test_voicetype.py` 的 `app` fixture）。
 
 執行緒模型（改動時最容易出錯）：
-- **event tap 執行緒**（`App.intercept`）：必須立即返回，否則 macOS 停用 tap 且 pynput 不會重新啟用。回傳 `None` 吞掉按鍵。不可開關麥克風（實測 0.07–1.4 秒）、不可做 AX 讀取、寫檔或碰 UI（含選單、通知）；UI 相關用 `AppHelper.callAfter` 回主執行緒，其他丟到短命執行緒。
+- **event tap 執行緒**（`App.intercept`）：必須立即返回，否則 macOS 停用 tap 且 pynput 不會重新啟用。沒有「輔助使用」權限時 pynput 建不了 tap，執行緒直接結束且不報錯；`App.watch_listener`（tick 每 2 秒）在授權後或收到 tap 停用事件時重建 listener，管理介面用 `listener.is_alive()` 判斷快捷鍵是否生效。回傳 `None` 吞掉按鍵。不可開關麥克風（實測 0.07–1.4 秒）、不可做 AX 讀取、寫檔或碰 UI（含選單、通知）；UI 相關用 `AppHelper.callAfter` 回主執行緒，其他丟到短命執行緒。
 - **主執行緒**（rumps `Timer` → `tick`）：所有 UI 更新（選單列 title、`Hud`）只在這裡。活動中 30fps、閒置 0.5 秒，切換頻率時重建 Timer。
 - **單一 worker 執行緒**（`App.worker` + `self.jobs`）：MLX GPU stream 綁執行緒，**所有 `transcribe` 都必須在這條**，含啟動預熱（`mode=None` 的 job）。
 - `Recorder.start/stop` 立即回傳 Future，實際工作在 Recorder 自己的單一執行緒依呼叫順序執行。不要改回「各開一條執行緒 + 鎖」：鎖不保證先後，Esc 太快時麥克風會關不掉。
 - `_finish` 會 `join` 讀情境的執行緒，避免短錄音拿不到選取文字。開始錄音時只用 AX 讀選取文字；結束時的模式是編輯且 AX 讀不到，才在 `_finish` 用 ⌘C 退路。
+- `window.Api` 的 `system` 就是 App（`status`、`capture`、`hotkeys_changed`、`request_permissions`、`open_privacy`、`restart`）；Api 在背景執行緒呼叫，碰選單或系統對話框的都要 `AppHelper.callAfter`。快捷鍵錄製：首頁呼叫 `capture` 設 `capturing`，下一個按鍵由 `intercept` 攔下，`save_capture` 存檔後呼叫頁面的 `captureDone()`。
 - WKWebView 的 bridge 回呼在主執行緒，`Bridge` 把 `Api.call` 丟背景執行緒（DGX 可能數秒），完成後用 `AppHelper.callAfter` 回主執行緒 `evaluateJavaScript`。
 
 狀態機：`idle → recording → busy → idle`，另有 `paused`。處理模式由**結束錄音時的快捷鍵**決定；長按放開則用開始時的模式。長按判斷在 `core.KeyLogic`，keyUp 只比 keycode（修飾鍵可能先放開）。

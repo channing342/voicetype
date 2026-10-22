@@ -78,6 +78,14 @@ class History:
             c.execute("DELETE FROM recordings WHERE id = ?", [rid])
         self.wav_path(rid).unlink(missing_ok=True)
 
+    def stats(self):
+        """首頁統計：筆數、錄音總秒數、整理後字數（不含空白）、DGX 成功筆數。"""
+        with self._conn() as c:
+            n, secs, ok = c.execute("SELECT COUNT(*), COALESCE(SUM(duration), 0), COALESCE(SUM(ok), 0)"
+                                    " FROM recordings").fetchone()
+            chars = sum(len("".join((t or "").split())) for (t,) in c.execute("SELECT text FROM recordings"))
+        return {"count": n, "seconds": secs, "chars": chars, "ok": ok}
+
     def purge(self, days):
         cutoff = time.time() - days * 86400
         with self._conn() as c:

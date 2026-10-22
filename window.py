@@ -9,21 +9,26 @@ from AppKit import NSApplication, NSBackingStoreBuffered, NSMakeRect, NSObject, 
 from PyObjCTools import AppHelper
 from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
 
-from core import ASR_CHOICES, CONFIG_PATH, apply_replacements, hf_cached, llm_refine, save_config, suggest_vocabulary
+from core import (ASR_CHOICES, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES, apply_replacements, hf_cached, llm_refine,
+                  match_hotkey, save_config, suggest_vocabulary)
 
 UI_DIR = Path(__file__).parent / "ui"
+TYPING_CPM = 40  # 估算省下時間用：一般人每分鐘約打 40 個中文字
 
 
 class Api:
     """頁面可呼叫的方法（只開放 METHODS 內的名稱）。cfg 用 getter 取得，App 重新載入設定後仍指向最新的。"""
 
     METHODS = {"list", "get", "audio", "delete", "reprocess", "copy", "vocab", "vocab_add", "vocab_remove",
-               "repl_set", "repl_remove", "vocab_suggest", "settings", "asr", "asr_set"}
+               "repl_set", "repl_remove", "vocab_suggest", "settings", "asr", "asr_set", "home", "hotkey_capture",
+               "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart"}
 
-    def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None):
-        """on_asr_change()：設定改了之後通知 App 到 worker 載入新模型；asr_status() → {"loading", "error"}。"""
+    def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None,
+                 system=None):
+        """on_asr_change()：設定改了之後通知 App 到 worker 載入新模型；asr_status() → {"loading", "error"}。
+        system：App 本身，提供快捷鍵錄製、權限、重新啟動（見 voicetype.App 的「管理介面」區段）。"""
         self.h, self.get_cfg, self.config_path, self._copy = history, get_cfg, config_path, copy
-        self.on_asr_change = on_asr_change
+        self.on_asr_change, self.system = on_asr_change, system
         self.asr_status = asr_status or (lambda: {"loading": False, "error": ""})
 
     def _save(self):
@@ -119,6 +124,47 @@ class Api:
                 self.on_asr_change()
         return self.asr()
 
+    def home(self):
+        cfg, st = self.get_cfg(), self.h.stats()
+        cpm = st["chars"] / (st["seconds"] / 60) if st["seconds"] else 0
+        cur = next((c["name"] for c in ASR_CHOICES if c["id"] == cfg["asr_model"]), cfg["asr_model"])
+        return {"hotkeys": cfg["hotkeys"], "defaults": DEFAULTS["hotkeys"], "modes": MODE_NAMES,
+                "styles": [{"name": r["name"], "style": r["style"]} for r in cfg["app_styles"]],
+                "stats": {**st, "cpm": round(cpm), "saved": max(0, st["chars"] / TYPING_CPM * 60 - st["seconds"]),
+                          "ok_rate": round(st["ok"] / st["count"] * 100) if st["count"] else None},
+                "asr": {"name": cur, **self.asr_status()}, "history_days": cfg["history_days"], **self.system.status()}
+
+    def hotkey_capture(self, mode):
+        self.system.capture(mode)
+        return True
+
+    def hotkey_cancel(self):
+        self.system.capturing = None
+        return True
+
+    def hotkey_reset(self, mode):
+        hotkeys, hk = self.get_cfg()["hotkeys"], DEFAULTS["hotkeys"][mode]
+        flags = sum(MOD_FLAGS[m] for m in hk["mods"])
+        other = match_hotkey({k: v for k, v in hotkeys.items() if k != mode}, hk["keycode"], flags)
+        if other:
+            raise ValueError(f"預設的 {hk['label']} 已被{MODE_NAMES[other]}使用")
+        hotkeys[mode] = dict(hk)
+        self._save()
+        self.system.hotkeys_changed()
+        return self.home()
+
+    def permissions_request(self):
+        self.system.request_permissions()
+        return True
+
+    def open_privacy(self, key):
+        self.system.open_privacy(key)
+        return True
+
+    def restart(self):
+        self.system.restart()
+        return True
+
     def call(self, method, args):
         """回傳 {"ok": bool, "result"/"error"}；未開放的方法一律拒絕。"""
         if method not in self.METHODS:
@@ -157,7 +203,7 @@ class MainWindow:
         ucc = WKUserContentController.alloc().init()
         ucc.addScriptMessageHandler_name_(self.bridge, "vt")
         conf.setUserContentController_(ucc)
-        rect = NSMakeRect(0, 0, 1080, 720)
+        rect = NSMakeRect(0, 0, 1180, 760)
         self.webview = WKWebView.alloc().initWithFrame_configuration_(rect, conf)
         self.bridge.webview = self.webview
         index = NSURL.URLWithString_(NSURL.fileURLWithPath_(str(UI_DIR / "index.html")).absoluteString() + "#" + tab)
@@ -166,17 +212,20 @@ class MainWindow:
             rect, 1 | 2 | 4 | 8, NSBackingStoreBuffered, False)  # titled | closable | miniaturizable | resizable
         self.window.setTitle_("Voicetype")
         self.window.setReleasedWhenClosed_(False)
-        self.window.setContentMinSize_((760, 480))
+        self.window.setContentMinSize_((900, 560))
         self.window.setContentView_(self.webview)
         self.window.center()
 
-    def show(self, tab="history"):
+    def show(self, tab="home"):
         if self.window is None:
             self._build(tab)
         else:
             self.js(f"showTab('{tab}')")
         self.window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
+    def visible(self):
+        return self.window is not None and self.window.isVisible()
 
     def js(self, code):
         """可從任何執行緒呼叫。"""
