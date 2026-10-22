@@ -28,7 +28,7 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 - **單一 worker 執行緒**（`App.worker` + `self.jobs`）：MLX GPU stream 綁執行緒，**所有 `transcribe` 都必須在這條**，含啟動預熱（`mode=None` 的 job）。
 - `Recorder.start/stop` 立即回傳 Future，實際工作在 Recorder 自己的單一執行緒依呼叫順序執行。不要改回「各開一條執行緒 + 鎖」：鎖不保證先後，Esc 太快時麥克風會關不掉。
 - `_finish` 會 `join` 讀情境的執行緒，避免短錄音拿不到選取文字。開始錄音時只用 AX 讀選取文字；結束時的模式是編輯且 AX 讀不到，才在 `_finish` 用 ⌘C 退路。
-- `window.Api` 的 `system` 就是 App（`status`、`capture`、`hotkeys_changed`、`request_permissions`、`open_privacy`、`restart`）；Api 在背景執行緒呼叫，碰選單或系統對話框的都要 `AppHelper.callAfter`。快捷鍵錄製：首頁呼叫 `capture` 設 `capturing`，下一個按鍵由 `intercept` 攔下，`save_capture` 存檔後呼叫頁面的 `captureDone()`。
+- `window.Api` 的 `system` 就是 App（`status`、`capture`、`config_changed`、`request_permissions`、`open_privacy`、`restart`）；Api 在背景執行緒呼叫，碰選單或系統對話框的都要 `AppHelper.callAfter`。快捷鍵錄製：首頁呼叫 `capture` 設 `capturing`，下一個按鍵由 `intercept` 攔下，`save_capture` 存檔後呼叫頁面的 `captureDone()`。
 - WKWebView 的 bridge 回呼在主執行緒，`Bridge` 把 `Api.call` 丟背景執行緒（DGX 可能數秒），完成後用 `AppHelper.callAfter` 回主執行緒 `evaluateJavaScript`。
 
 狀態機：`idle → recording → busy → idle`，另有 `paused`。處理模式由**結束錄音時的快捷鍵**決定；長按放開則用開始時的模式。長按判斷在 `core.KeyLogic`，keyUp 只比 keycode（修飾鍵可能先放開）。

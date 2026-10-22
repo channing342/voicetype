@@ -220,6 +220,11 @@ main.on { display: flex; }
 .card p.hint { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
 .row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 .row input[type=text] { flex: 1; max-width: 320px; }
+.form { display: grid; grid-template-columns: 1fr; gap: 10px; max-width: 560px; margin-bottom: 14px; }
+.form label { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
+.form input { color: var(--text); font-size: 14px; }
+.form input[type=number] { width: 100px; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 10px; outline: none; }
+.ok-text { color: var(--ok); }
 .rtable td:first-child { width: 40%; }
 .words { display: flex; flex-wrap: wrap; gap: 6px; }
 .word {
@@ -298,6 +303,16 @@ main.on { display: flex; }
 </main>
 
 <main id="settings">
+  <div class="card">
+    <h2>LLM 整理</h2>
+    <p class="hint">辨識完的文字交給這個 OpenAI 相容的 chat completions API 整理；逾時或連不上時改貼辨識原文。</p>
+    <div class="form">
+      <label>API 網址<input id="llmUrl" type="text" placeholder="http://host:8888/v1/chat/completions"></label>
+      <label>模型<input id="llmModel" type="text" placeholder="Qwen3.8-Flash-Next"></label>
+      <label>逾時（秒）<input id="llmTimeout" type="number" min="1" max="120" step="1"></label>
+    </div>
+    <div class="row"><button class="primary" id="llmSave">儲存</button><button id="llmTest">測試連線</button><span class="status" id="llmStatus"></span></div>
+  </div>
   <div class="card">
     <h2>語音辨識模型</h2>
     <p class="hint">在本機 Apple Silicon 上用 MLX 執行。切換後會釋放舊模型、載入新模型；第一次使用需要下載，載入期間的錄音會排隊等待。</p>
@@ -534,7 +549,25 @@ function renderAsr(a) {
     renderAsr(await call("asr_set", el.dataset.id)); pollAsr();
   });
 }
-async function loadAsr() { const a = await call("asr"); renderAsr(a); if (a.loading) pollAsr(); }
+async function loadAsr() { const a = await call("asr"); renderAsr(a); if (a.loading) pollAsr(); loadLlm(); }
+
+/* ---------- 設定：LLM ---------- */
+const errText = (e) => e.message.replace(/^\w+Error\(['"]|['"]\)$/g, "");
+const llmForm = () => [$("#llmUrl").value, $("#llmModel").value, $("#llmTimeout").value];
+async function loadLlm() {
+  const l = await call("llm");
+  $("#llmUrl").value = l.llm_url; $("#llmModel").value = l.llm_model; $("#llmTimeout").value = l.llm_timeout;
+}
+$("#llmSave").onclick = async () => {
+  try { await call("llm_set", ...llmForm()); $("#llmStatus").innerHTML = '<span class="ok-text">已儲存</span>'; }
+  catch (e) { $("#llmStatus").innerHTML = `<span class="badge-warn">${esc(errText(e))}</span>`; }
+};
+$("#llmTest").onclick = async () => {
+  const b = $("#llmTest"); b.disabled = true; $("#llmStatus").textContent = "測試中…";
+  try { const r = await call("llm_test", ...llmForm()); $("#llmStatus").innerHTML = `<span class="ok-text">連線成功，${r.ms} ms</span>：${esc(r.reply)}`; }
+  catch (e) { $("#llmStatus").innerHTML = `<span class="badge-warn">連線失敗：${esc(errText(e))}</span>`; }
+  b.disabled = false;
+};
 function pollAsr() {
   clearTimeout(asrPoll);
   asrPoll = setTimeout(async () => {
@@ -568,6 +601,11 @@ const STAT_IC = {
 };
 const stat = (ic, v, unit) => `<div class="stat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STAT_IC[ic]}</svg><b>${v}</b><span>${unit}</span></div>`;
 
+function renderSide(h) {
+  $("#sideStatus").innerHTML = `<div class="k">快捷鍵</div><div class="v"><span class="${h.hotkeys_active ? "dot-ok" : "dot-bad"}"></span>${h.hotkeys_active ? "已啟用" : "未啟用"}</div>
+    <div class="k">開啟管理介面</div><div class="v">${esc(h.hotkeys.window.label)}</div>
+    <div class="k">紀錄保留</div><div class="v">${h.history_days} 天</div>`;
+}
 function renderHome(h) {
   home = h;
   capturing = h.capturing;
@@ -599,9 +637,8 @@ function renderHome(h) {
     return `<div class="perm" title="${why}"><span><span class="${v ? "dot-ok" : "dot-bad"}"></span>${name}</span>${v ? '<span class="meta">已允許</span>' : `<button data-open="${k}">前往設定</button>`}</div>`;
   }).join("") + (missing.length ? "" : `<p>快捷鍵${h.hotkeys_active ? "運作中" : "尚未啟用"}</p>`);
   $("#asrCard").innerHTML = `<h3>辨識模型</h3><p>${esc(h.asr.name)}${h.asr.loading ? "（載入中…）" : h.asr.error ? "（載入失敗）" : ""}</p>`;
-  $("#sideStatus").innerHTML = `<div class="k">快捷鍵</div><div class="v"><span class="${h.hotkeys_active ? "dot-ok" : "dot-bad"}"></span>${h.hotkeys_active ? "已啟用" : "未啟用"}</div>
-    <div class="k">開啟管理介面</div><div class="v">${esc(h.hotkeys.window.label)}</div>
-    <div class="k">紀錄保留</div><div class="v">${h.history_days} 天</div>`;
+  renderSide(h);
+
 
   document.querySelectorAll("[data-cap]").forEach((b) => b.onclick = async () => {
     delete msgs[b.dataset.cap];
@@ -642,6 +679,7 @@ document.querySelectorAll("#theme button").forEach((b) => b.onclick = () => setT
 let savedTheme = ""; try { savedTheme = localStorage.getItem("theme") || ""; } catch (e) {}
 setTheme(savedTheme);
 
+call("home").then(renderSide);  // 側欄在每個分頁都要有內容
 showTab(TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "home");
 </script>
 </body>

@@ -252,7 +252,7 @@ def test_api_home_and_hotkey_reset(tmp_path):
         def capture(self, mode):
             self.capturing = mode
 
-        def hotkeys_changed(self):
+        def config_changed(self):
             self.changed += 1
 
     cfg, sysm = cfg_with(), System()
@@ -275,6 +275,24 @@ def test_api_home_and_hotkey_reset(tmp_path):
     assert api.call("hotkey_reset", ["edit"])["ok"] and cfg["hotkeys"]["edit"]["label"] == "⌘;"
     assert api.call("hotkey_reset", ["clean"])["ok"] and cfg["hotkeys"]["clean"]["label"] == "⌘,"
     assert sysm.changed == 2 and json.loads((tmp_path / "c.json").read_text())["hotkeys"]["clean"]["keycode"] == 43
+
+
+def test_api_llm_settings_validate_save_and_test(tmp_path):
+    from window import Api
+    cfg, changed = cfg_with(), []
+    sysm = type("S", (), {"config_changed": lambda self: changed.append(1)})()
+    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json", system=sysm)
+    assert api.call("llm", [])["result"] == {"llm_url": DGX, "llm_model": "Qwen3.8-Flash-Next", "llm_timeout": 10}
+    for bad in (["ftp://x", "m", 10], ["http://x", " ", 10], ["http://x", "m", 0]):
+        assert not api.call("llm_set", bad)["ok"]
+    assert cfg["llm_url"] == DGX and changed == []  # 驗證失敗不寫入
+    srv = fake_llm(0, "OK")
+    r = api.call("llm_test", [srv.url, "test-model", "5"])["result"]
+    assert r["reply"] == "OK" and srv.body["model"] == "test-model" and cfg["llm_model"] == "Qwen3.8-Flash-Next"  # 測試不儲存
+    assert api.call("llm_set", [f" {srv.url} ", "test-model", "15"])["ok"]
+    saved = json.loads((tmp_path / "c.json").read_text())
+    assert (saved["llm_url"], saved["llm_model"], saved["llm_timeout"]) == (srv.url, "test-model", 15) and changed == [1]
+    assert not api.call("llm_test", ["http://127.0.0.1:9/v1", "m", 1])["ok"]
 
 
 def test_history_add_list_search_update_delete_purge(tmp_path):

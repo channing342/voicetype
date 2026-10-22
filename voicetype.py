@@ -139,7 +139,7 @@ class App(rumps.App):
             raise RuntimeError("快捷鍵功能還沒啟用，請先允許「輔助使用」權限")
         self.capturing = mode
 
-    def hotkeys_changed(self):
+    def config_changed(self):
         AppHelper.callAfter(self.build_menu)
 
     def request_permissions(self):

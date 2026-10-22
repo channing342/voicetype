@@ -9,8 +9,10 @@ from AppKit import NSApplication, NSBackingStoreBuffered, NSMakeRect, NSObject, 
 from PyObjCTools import AppHelper
 from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
 
-from core import (ASR_CHOICES, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES, apply_replacements, hf_cached, llm_refine,
-                  match_hotkey, save_config, suggest_vocabulary)
+import time
+
+from core import (ASR_CHOICES, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES, apply_replacements, chat, hf_cached,
+                  llm_refine, match_hotkey, save_config, suggest_vocabulary)
 
 UI_DIR = Path(__file__).parent / "ui"
 TYPING_CPM = 40  # 估算省下時間用：一般人每分鐘約打 40 個中文字
@@ -21,7 +23,8 @@ class Api:
 
     METHODS = {"list", "get", "audio", "delete", "reprocess", "copy", "vocab", "vocab_add", "vocab_remove",
                "repl_set", "repl_remove", "vocab_suggest", "settings", "asr", "asr_set", "home", "hotkey_capture",
-               "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart"}
+               "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart",
+               "llm", "llm_set", "llm_test"}
 
     def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None,
                  system=None):
@@ -124,6 +127,35 @@ class Api:
                 self.on_asr_change()
         return self.asr()
 
+    def llm(self):
+        cfg = self.get_cfg()
+        return {k: cfg[k] for k in ("llm_url", "llm_model", "llm_timeout")}
+
+    @staticmethod
+    def _llm_fields(url, model, timeout):
+        url, model, timeout = url.strip(), model.strip(), float(timeout)
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("網址要以 http:// 或 https:// 開頭")
+        if not model:
+            raise ValueError("請填模型名稱")
+        if not 1 <= timeout <= 120:
+            raise ValueError("逾時要在 1 到 120 秒之間")
+        return {"llm_url": url, "llm_model": model, "llm_timeout": int(timeout) if timeout.is_integer() else timeout}
+
+    def llm_set(self, url, model, timeout):
+        self.get_cfg().update(self._llm_fields(url, model, timeout))
+        self._save()
+        if self.system:
+            self.system.config_changed()  # 選單列的「LLM 逾時」勾選要跟著變
+        return self.llm()
+
+    def llm_test(self, url, model, timeout):
+        """用表單上（還沒儲存）的值送一句測試，回傳 {ms, reply}；失敗直接拋出例外給頁面顯示。"""
+        cfg = {**self.get_cfg(), **self._llm_fields(url, model, timeout)}
+        t0 = time.time()
+        reply = chat([{"role": "user", "content": "只回答「OK」兩個字母"}], cfg)
+        return {"ms": round((time.time() - t0) * 1000), "reply": reply[:200]}
+
     def home(self):
         cfg, st = self.get_cfg(), self.h.stats()
         cpm = st["chars"] / (st["seconds"] / 60) if st["seconds"] else 0
@@ -150,7 +182,7 @@ class Api:
             raise ValueError(f"預設的 {hk['label']} 已被{MODE_NAMES[other]}使用")
         hotkeys[mode] = dict(hk)
         self._save()
-        self.system.hotkeys_changed()
+        self.system.config_changed()
         return self.home()
 
     def permissions_request(self):
