@@ -20,4 +20,4 @@ dev = [
     "pytest-cov>=7.1.0",
 ]
 [tool.pytest.ini_options]
-markers = ["e2e: 需要麥克風以外的真實環境（本機 Whisper + DGX）"]
+markers = ["e2e: 需要真實環境（本機辨識模型、DGX、麥克風）"]

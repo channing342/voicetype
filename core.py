@@ -4,8 +4,9 @@ import gc
 import json
 import os
 import re
-import threading
+import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -132,9 +133,27 @@ class KeyLogic:
         return None
 
 
+def parse_capture(hotkeys, mode, keycode, flags, char):
+    """錄製快捷鍵：回傳 (新的快捷鍵設定或 None, 提示訊息)。按 Esc 取消時訊息是空字串。"""
+    if keycode == KEY_ESC:
+        return None, ""
+    mods = event_mods(flags)
+    if not mods:
+        return None, "快捷鍵需包含 ⌘ ⌥ ⌃ ⇧ 其中之一"
+    other = match_hotkey({k: v for k, v in hotkeys.items() if k != mode}, keycode, flags)
+    if other:
+        return None, f"與{MODE_NAMES[other]}快捷鍵 {hotkeys[other]['label']} 重複"
+    label = "".join(MOD_SYMBOLS[m] for m in ("ctrl", "alt", "shift", "cmd") if m in mods) + \
+        ((char or "").upper().strip() or f"key{keycode}")
+    return {"keycode": keycode, "mods": mods, "label": label}, f"{MODE_NAMES[mode]}快捷鍵：{label}"
+
+
+def rms(x):
+    return float(np.sqrt(np.mean(x ** 2)))
+
+
 def is_too_short_or_silent(audio, cfg):
-    return len(audio) < cfg["min_seconds"] * SAMPLE_RATE or \
-        float(np.sqrt(np.mean(audio ** 2))) < cfg["silence_rms"]
+    return len(audio) < cfg["min_seconds"] * SAMPLE_RATE or rms(audio) < cfg["silence_rms"]
 
 
 def whisper_prompt(cfg):
@@ -271,29 +290,36 @@ def suggest_vocabulary(texts, cfg):
 
 
 class Recorder:
-    """start/stop 在背景執行緒呼叫（開麥克風可能超過 1 秒，不能卡住 event tap），用鎖保證順序。"""
+    """開關麥克風可能超過 1 秒，不能卡住 event tap。start/stop 立即返回 Future，實際工作在同一條執行緒依呼叫順序執行。
+    只用鎖不夠：鎖只保證互斥不保證先後，stop 先搶到鎖的話，之後才開的麥克風就沒人關。"""
 
     def __init__(self):
         self.chunks, self.levels, self.stream, self.started = [], [], None, 0.0
-        self.lock = threading.Lock()
+        self.ops = ThreadPoolExecutor(max_workers=1, thread_name_prefix="recorder")
 
     def start(self):
+        self.started, self.levels = time.time(), []
+        return self.ops.submit(self._start)
+
+    def stop(self):
+        """Future 的結果是錄到的音訊（float32）。"""
+        return self.ops.submit(self._stop)
+
+    def _start(self):
         import sounddevice as sd
-        with self.lock:
-            self.chunks, self.levels = [], []
-            # 每區塊 50ms，levels 一格就是浮動視窗的一根柱子
-            self.stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                                         blocksize=SAMPLE_RATE // 20, callback=self._on_audio)
-            self.stream.start()
+        self.chunks = []
+        # 每區塊 50ms，levels 一格就是浮動視窗的一根柱子
+        self.stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                                     blocksize=SAMPLE_RATE // 20, callback=self._on_audio)
+        self.stream.start()
 
     def _on_audio(self, data, *_):
         self.chunks.append(data.copy())
-        self.levels.append(float(np.sqrt(np.mean(data ** 2))))
+        self.levels.append(rms(data))
 
-    def stop(self):
-        with self.lock:
-            if self.stream:
-                self.stream.stop()
-                self.stream.close()
-                self.stream = None
-            return np.concatenate(self.chunks)[:, 0] if self.chunks else np.zeros(0, np.float32)
+    def _stop(self):
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+        return np.concatenate(self.chunks)[:, 0] if self.chunks else np.zeros(0, np.float32)

@@ -183,6 +183,53 @@ def test_suggest_vocabulary_parses_fenced_json_and_dedups():
     srv.shutdown()
 
 
+def test_parse_capture():
+    hk = core.DEFAULTS["hotkeys"]
+    cmd = core.MOD_FLAGS["cmd"]
+    assert core.parse_capture(hk, "clean", core.KEY_ESC, cmd, "") == (None, "")
+    assert core.parse_capture(hk, "clean", 0, 0, "a")[0] is None  # 沒有修飾鍵
+    new, msg = core.parse_capture(hk, "clean", 47, cmd, ".")  # 跟整理模式的 ⌘. 重複
+    assert new is None and "整理" in msg
+    assert core.parse_capture(hk, "clean", 43, cmd, ",")[0]["label"] == "⌘,"  # 重錄成自己原本的鍵可以
+    new, msg = core.parse_capture(hk, "clean", 0, cmd | core.MOD_FLAGS["shift"], "a")
+    assert new == {"keycode": 0, "mods": ["cmd", "shift"], "label": "⇧⌘A"} and "⇧⌘A" in msg
+
+
+class FakeStream:
+    """模擬 sounddevice.InputStream；開啟很慢，重現「Esc 比開麥克風還快」的競態。"""
+    opened = []
+
+    def __init__(self, **kw):
+        time.sleep(0.2)
+        self.closed = False
+        FakeStream.opened.append(self)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def test_recorder_stop_right_after_start_still_closes_mic(monkeypatch):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(InputStream=FakeStream))
+    FakeStream.opened = []
+    r = core.Recorder()
+    r.start()
+    r.stop().result(timeout=2)  # 呼叫順序 start → stop，即使開麥克風很慢也要依序執行
+    assert len(FakeStream.opened) == 1 and FakeStream.opened[0].closed and r.stream is None
+    r.start()
+    r.stop()
+    r.start()
+    r.stop().result(timeout=2)
+    assert all(s.closed for s in FakeStream.opened) and len(FakeStream.opened) == 3
+
+
 # ---------- 歷史紀錄 ----------
 
 def test_history_add_list_search_update_delete_purge(tmp_path):
@@ -225,6 +272,19 @@ def test_api_vocab_reprocess_and_method_allowlist(tmp_path):
     assert api.call("list", [""])["result"][0]["preview"] == "OT 帳號整理後"
     assert len(api.call("audio", [rid])["result"]) > 0
     srv.shutdown()
+
+
+def test_api_reprocess_keeps_record_when_dgx_fails(tmp_path):
+    from window import Api
+    cfg = cfg_with(llm_url="http://127.0.0.1:1/x")
+    h = History(tmp_path)
+    api = Api(h, lambda: cfg, config_path=tmp_path / "c.json")
+    rid = h.add(np.zeros(8000, np.float32), mode="clean", raw="原文", text="好的結果", ok=1)
+    res = api.call("reprocess", [rid, "organize"])
+    assert res["ok"] is False and "DGX" in res["error"]
+    assert h.get(rid)["text"] == "好的結果" and h.get(rid)["mode"] == "clean"
+    res = api.call("reprocess", [rid, "edit"])  # 沒有選取文字的紀錄不能改成編輯模式
+    assert res["ok"] is False and "選取" in res["error"]
 
 
 # ---------- macOS 介面元件 ----------
@@ -331,8 +391,192 @@ def test_e2e_suggest_vocabulary():
 @pytest.mark.e2e
 def test_recorder_start_stop():
     r = core.Recorder()
-    assert len(r.stop()) == 0
-    r.start()
+    assert len(r.stop().result()) == 0
+    r.start().result()  # 等麥克風真的打開再開始計時
     time.sleep(0.5)
-    audio = r.stop()
+    audio = r.stop().result()
     assert audio.dtype == np.float32 and len(audio) > core.SAMPLE_RATE * 0.3 and r.levels
+
+
+# ---------- App（voicetype.py）：不建立選單列與 event tap，只把需要的屬性塞進去 ----------
+
+class Done:
+    def __init__(self, value=None, error=None):
+        self.value, self.error = value, error
+
+    def result(self, timeout=None):
+        if self.error:
+            raise self.error
+        return self.value
+
+    def exception(self):
+        return self.error
+
+    def add_done_callback(self, fn):
+        fn(self)
+
+
+class FakeRec:
+    def __init__(self, audio=None):
+        self.calls, self.audio, self.started, self.levels = [], audio, 0.0, []
+
+    def start(self):
+        self.calls.append("start")
+        return Done()
+
+    def stop(self):
+        self.calls.append("stop")
+        return Done(self.audio if self.audio is not None else np.zeros(0, np.float32))
+
+
+@pytest.fixture
+def app(tmp_path, monkeypatch):
+    import queue
+    import voicetype
+    a = object.__new__(voicetype.App)
+    a.cfg = cfg_with()
+    a.state, a.mode, a.capturing, a.last_text = "idle", None, None, ""
+    a.ctx, a.stage, a.stage_start, a.flash = {}, None, 0.0, ("", 0.0)
+    a.ctx_thread = threading.Thread()
+    a.keys = core.KeyLogic(0.4)
+    a.rec, a.history, a.purged, a.jobs = FakeRec(), History(tmp_path), 0.0, queue.Queue()
+    a.win = type("W", (), {"js": lambda self, code: None, "show": lambda self, tab: None})()
+    a.notes = []
+    monkeypatch.setattr(voicetype.rumps, "notification", lambda *x: a.notes.append(x))
+    monkeypatch.setattr(voicetype, "save_config", lambda cfg: None)
+    monkeypatch.setattr(a, "build_menu", lambda: None, raising=False)
+    return a
+
+
+def key_event(keycode, flags, down=True):
+    import Quartz
+    ev = Quartz.CGEventCreateKeyboardEvent(None, keycode, down)
+    Quartz.CGEventSetFlags(ev, flags)
+    return (Quartz.kCGEventKeyDown if down else Quartz.kCGEventKeyUp), ev
+
+
+def test_app_hotkey_capture_defers_to_main_thread(app, monkeypatch):
+    import voicetype
+    calls = []
+    monkeypatch.setattr(voicetype.AppHelper, "callAfter", lambda fn, *a: calls.append((fn, a)))
+    app.capturing = "clean"
+    assert app.intercept(*key_event(0, core.MOD_FLAGS["cmd"] | core.MOD_FLAGS["shift"])) is None
+    assert app.capturing is None and app.notes == []  # event tap 執行緒沒有寫檔、碰選單或發通知
+    (fn, args), = calls
+    assert fn == app.save_capture and args[:3] == ("clean", 0, core.MOD_FLAGS["cmd"] | core.MOD_FLAGS["shift"])
+    fn(*args)
+    assert app.cfg["hotkeys"]["clean"]["mods"] == ["cmd", "shift"] and app.notes[0][1] == "已更新"
+    app.save_capture("clean", 47, core.MOD_FLAGS["cmd"], ".")  # 重複就不改
+    assert app.cfg["hotkeys"]["clean"]["keycode"] == 0 and app.notes[1][1] == "未變更"
+
+
+def test_app_hotkey_and_esc_flow(app):
+    cmd = core.MOD_FLAGS["cmd"]
+    app.ctx_thread = threading.Thread()
+    app.start = lambda m: (setattr(app, "state", "recording"), setattr(app, "mode", m), app.rec.start())
+    assert app.intercept(*key_event(43, cmd)) is None and app.state == "recording" and app.mode == "clean"
+    assert app.intercept(*key_event(43, cmd, down=False)) is None  # 短按放開：繼續錄
+    assert app.intercept(*key_event(core.KEY_ESC, 0)) is None and app.state == "idle"
+    assert app.rec.calls == ["start", "stop"]  # Esc 也會關麥克風
+    assert app.intercept(*key_event(12, cmd)) is not None  # 非快捷鍵放行
+    app.state = "paused"
+    assert app.intercept(*key_event(43, cmd)) is not None  # 暫停時快捷鍵也放行
+
+
+def test_app_finish_reads_selection_with_copy_only_for_edit(app, monkeypatch):
+    import voicetype
+    calls = []
+    monkeypatch.setattr(voicetype.macos, "read_selection", lambda allow_copy=True: calls.append(allow_copy) or "選取")
+    monkeypatch.setattr(voicetype.macos, "frontmost_context", lambda inc: {"app": "Slack"})
+    ctx = {}
+    app.capture_context(ctx)
+    assert calls == [False] and ctx["selection"] == "選取"  # 開始時只做 AX 讀取
+
+    calls.clear()
+    app.ctx, app.ctx_thread = {}, threading.Thread()
+    app.ctx_thread.start()  # 實際流程中 start() 一定先啟動讀取情境的執行緒
+    app._finish("edit")  # 用其他鍵開始、⌘; 結束：AX 讀不到時補 ⌘C
+    assert calls == [True] and app.jobs.get_nowait()[2]["selection"] == "選取"
+    app._finish("clean")
+    assert calls == [True] and "selection" not in app.jobs.get_nowait()[2]
+
+
+def test_app_process_paste_and_edit_failure(app, monkeypatch):
+    import voicetype
+    pasted = []
+    monkeypatch.setattr(voicetype.macos, "paste", pasted.append)
+    monkeypatch.setattr(voicetype, "transcribe", lambda audio, cfg: ("原文", []))
+    audio = 0.1 * np.ones(core.SAMPLE_RATE, np.float32)
+
+    monkeypatch.setattr(voicetype, "llm_refine", lambda *a: ("整理後", True))
+    app.process(audio, "clean", {"app": "Slack"})
+    assert pasted == ["整理後"] and app.last_text == "整理後"
+
+    monkeypatch.setattr(voicetype, "llm_refine", lambda text, *a: (text, False))
+    app.process(audio, "edit", {"selection": "原句"})
+    assert pasted == ["整理後"]  # 編輯模式 DGX 失敗不貼上
+    r = app.history.list()[0]
+    assert r["mode"] == "edit" and r["selection"] == "原句" and r["ok"] is False
+
+    app.process(audio, "edit", {})
+    assert len(app.history.list()) == 2 and "選取" in app.flash[0]
+
+
+def test_app_purges_history_periodically(app):
+    rid = app.history.add(np.zeros(800, np.float32), mode="clean", raw="舊", text="舊")
+    app.history.update(rid, created=time.time() - 31 * 86400)
+    now = time.time()
+    app.purge_history(now)
+    for _ in range(50):  # 在背景執行緒刪
+        if not app.history.list():
+            break
+        time.sleep(0.02)
+    assert app.history.list() == [] and app.purged == now
+    rid = app.history.add(np.zeros(800, np.float32), mode="clean", raw="舊", text="舊")
+    app.history.update(rid, created=time.time() - 31 * 86400)
+    app.purge_history(now + 60)  # 一小時內不重複掃
+    assert len(app.history.list()) == 1
+
+
+def test_app_late_context_thread_does_not_leak_into_next_recording(app, monkeypatch):
+    import voicetype
+    gate = threading.Event()
+
+    def slow_context(inc):
+        gate.wait(2)
+        return {"app": "上一個 App"}
+    monkeypatch.setattr(voicetype.macos, "frontmost_context", slow_context)
+    monkeypatch.setattr(voicetype.macos, "read_selection", lambda allow_copy=True: "舊的選取")
+    app.start("clean")
+    old_thread = app.ctx_thread
+    app.state = "idle"
+    monkeypatch.setattr(voicetype.macos, "frontmost_context", lambda inc: {"app": "目前 App"})
+    monkeypatch.setattr(voicetype.macos, "read_selection", lambda allow_copy=True: "")
+    app.start("edit")
+    app.ctx_thread.join(1)
+    gate.set()
+    old_thread.join(1)  # 上一輪的讀取這時才完成
+    assert app.ctx == {"app": "目前 App", "selection": ""}
+
+
+def test_app_finish_failure_and_mic_failure_return_to_idle(app, monkeypatch):
+    app.state = "busy"
+    app.rec.stop = lambda: Done(error=OSError("PortAudio"))
+    app._finish("clean")
+    assert app.state == "idle" and app.jobs.empty() and "處理失敗" in app.flash[0]
+
+    app.rec.start = lambda: Done(error=OSError("沒有麥克風權限"))
+    monkeypatch.setattr(app, "capture_context", lambda ctx: None)
+    app.start("clean")
+    assert app.state == "idle" and "麥克風" in app.flash[0]
+
+
+def test_app_pause_only_when_idle(app):
+    sender = type("S", (), {"state": 0})()
+    app.toggle_pause(sender)
+    assert app.state == "paused" and sender.state == 1
+    app.toggle_pause(sender)
+    assert app.state == "idle" and sender.state == 0
+    app.state = "recording"
+    app.toggle_pause(sender)
+    assert app.state == "recording" and "無法暫停" in app.flash[0]

@@ -10,9 +10,9 @@ Voicetype：macOS 選單列語音輸入工具。快捷鍵錄音 → 本機 mlx W
 uv sync
 uv run python voicetype.py                   # 前景啟動，印出「就緒」才可用
 uv run pytest -q -m "not e2e"                # 不需外部資源
-uv run pytest -q                             # 含 E2E：本機 Whisper 模型 + 真實 DGX + 麥克風
+uv run pytest -q                             # 含 E2E：本機辨識模型 + 真實 DGX + 麥克風
 uv run pytest -q test_voicetype.py::test_keylogic_hold_to_talk   # 單一測試
-uv run pytest --cov=core --cov=history --cov=window --cov=hud --cov=macos --cov-report=term-missing
+uv run pytest --cov=core --cov=history --cov=window --cov=hud --cov=macos --cov=voicetype --cov-report=term-missing
 tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 ```
 
@@ -20,13 +20,14 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 
 ## 架構重點
 
-模組分層：`core`（純邏輯，不 import AppKit）→ `macos` / `history` / `hud` / `window`（各自包一塊系統功能）→ `voicetype.run_app()` 內定義 rumps `App` 串起全部。`run_app` 延遲 import GUI 套件，測試 import 其他模組不會啟動 App。
+模組分層：`core`（純邏輯，不 import AppKit）→ `macos` / `history` / `hud` / `window`（各自包一塊系統功能）→ `voicetype.App`（rumps）串起全部。import `voicetype` 不會啟動 App，測試用 `object.__new__(App)` 塞入需要的屬性，直接測方法（見 `test_voicetype.py` 的 `app` fixture）。
 
 執行緒模型（改動時最容易出錯）：
-- **event tap 執行緒**（`App.intercept`）：必須立即返回，否則 macOS 停用 tap 且 pynput 不會重新啟用。回傳 `None` 吞掉按鍵。不可開關麥克風（實測 0.07–1.4 秒）、不可做 AX 讀取或碰 UI；這些都丟到短命執行緒。
+- **event tap 執行緒**（`App.intercept`）：必須立即返回，否則 macOS 停用 tap 且 pynput 不會重新啟用。回傳 `None` 吞掉按鍵。不可開關麥克風（實測 0.07–1.4 秒）、不可做 AX 讀取、寫檔或碰 UI（含選單、通知）；UI 相關用 `AppHelper.callAfter` 回主執行緒，其他丟到短命執行緒。
 - **主執行緒**（rumps `Timer` → `tick`）：所有 UI 更新（選單列 title、`Hud`）只在這裡。活動中 30fps、閒置 0.5 秒，切換頻率時重建 Timer。
 - **單一 worker 執行緒**（`App.worker` + `self.jobs`）：MLX GPU stream 綁執行緒，**所有 `transcribe` 都必須在這條**，含啟動預熱（`mode=None` 的 job）。
-- `Recorder.start/stop` 用 `Recorder.lock` 保證順序；`_finish` 會 `join` 讀情境的執行緒，避免短錄音拿不到選取文字。
+- `Recorder.start/stop` 立即回傳 Future，實際工作在 Recorder 自己的單一執行緒依呼叫順序執行。不要改回「各開一條執行緒 + 鎖」：鎖不保證先後，Esc 太快時麥克風會關不掉。
+- `_finish` 會 `join` 讀情境的執行緒，避免短錄音拿不到選取文字。開始錄音時只用 AX 讀選取文字；結束時的模式是編輯且 AX 讀不到，才在 `_finish` 用 ⌘C 退路。
 - WKWebView 的 bridge 回呼在主執行緒，`Bridge` 把 `Api.call` 丟背景執行緒（DGX 可能數秒），完成後用 `AppHelper.callAfter` 回主執行緒 `evaluateJavaScript`。
 
 狀態機：`idle → recording → busy → idle`，另有 `paused`。處理模式由**結束錄音時的快捷鍵**決定；長按放開則用開始時的模式。長按判斷在 `core.KeyLogic`，keyUp 只比 keycode（修飾鍵可能先放開）。

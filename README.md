@@ -19,7 +19,9 @@
 | 切換辨識模型 | 管理介面 →「設定」：Whisper Large V3 Turbo／Qwen3-ASR 0.6B／Qwen3-ASR 1.7B，點選就切換；第一次使用會自動下載 |
 | 錄音浮動視窗 | Classic（波形加狀態列）、Mini（只有波形）、不顯示，三種樣式從選單列切換 |
 | 不污染剪貼簿 | 貼上後還原原本的剪貼簿，Raycast、Paste 這類剪貼簿管理器也不會記錄 |
-| DGX 失敗時 | 超過逾時時間（預設 10 秒）就改貼 Whisper 原文；編輯模式則不修改原本的文字 |
+| DGX 失敗時 | 超過逾時時間（預設 10 秒）就改貼辨識原文；編輯模式則不修改原本的文字。在歷史紀錄裡重新處理失敗時，紀錄也不會被改動 |
+| 重新貼上 | 選單列 →「重新貼上上一次結果」：把最近一次貼上的文字再貼一次到目前的 App |
+| 暫停 | 選單列 →「暫停」：暫時停用所有快捷鍵（按鍵照常傳給其他 App），圖示變成 ⏸，再點一次恢復 |
 
 所有快捷鍵都可以從選單列 →「快捷鍵」重新錄製。
 
@@ -85,7 +87,7 @@ launchctl load ~/Library/LaunchAgents/com.hyjay.voicetype.plist     # 停用時�
 | `asr_model` | `mlx-community/whisper-large-v3-turbo` | 辨識模型，建議從管理介面「設定」切換；也可以填其他 mlx-audio 支援的 repo |
 | `hold_threshold` | 0.4 | 按住超過幾秒算長按 |
 | `llm_timeout` | 10 | DGX 逾時秒數，選單列可以快速切換 |
-| `history_days` | 30 | 歷史紀錄保留天數 |
+| `history_days` | 30 | 歷史紀錄保留天數（啟動時和之後每小時刪除過期紀錄） |
 | `hud_style` | `classic` | `classic`／`mini`／`none` |
 | `vocabulary`、`replacements` | | 建議從詞彙管理視窗維護 |
 | `app_styles` | 郵件、聊天、終端機／IDE | 依 App 套用的語氣規則。`apps` 填 bundle id，可以用 `*` 萬用字元；`title` 填視窗標題的關鍵字 |

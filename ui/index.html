@@ -302,7 +302,7 @@ function renderDetail(showInfo = false) {
   $("#redo").onclick = async () => {
     const b = $("#redo"); b.disabled = true; b.textContent = "DGX 處理中…";
     try { current = await call("reprocess", r.id, $("#rmode").value); view = "ai"; renderDetail(showInfo); refresh(); }
-    catch (e) { b.textContent = "失敗"; b.disabled = false; }
+    catch (e) { b.textContent = /DGX/.test(e.message) ? "DGX 未回應，未修改" : "失敗"; b.title = e.message; b.disabled = false; }
   };
   $("#info").onclick = () => renderDetail(!showInfo);
   $("#del").onclick = async () => {

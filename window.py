@@ -9,7 +9,7 @@ from AppKit import NSApplication, NSBackingStoreBuffered, NSMakeRect, NSObject, 
 from PyObjCTools import AppHelper
 from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
 
-from core import ASR_CHOICES, apply_replacements, hf_cached, llm_refine, save_config, suggest_vocabulary
+from core import ASR_CHOICES, CONFIG_PATH, apply_replacements, hf_cached, llm_refine, save_config, suggest_vocabulary
 
 UI_DIR = Path(__file__).parent / "ui"
 
@@ -20,17 +20,14 @@ class Api:
     METHODS = {"list", "get", "audio", "delete", "reprocess", "copy", "vocab", "vocab_add", "vocab_remove",
                "repl_set", "repl_remove", "vocab_suggest", "settings", "asr", "asr_set"}
 
-    def __init__(self, history, get_cfg, config_path=None, copy=None, on_asr_change=None, asr_status=None):
+    def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None):
         """on_asr_change()：設定改了之後通知 App 到 worker 載入新模型；asr_status() → {"loading", "error"}。"""
         self.h, self.get_cfg, self.config_path, self._copy = history, get_cfg, config_path, copy
         self.on_asr_change = on_asr_change
         self.asr_status = asr_status or (lambda: {"loading": False, "error": ""})
 
     def _save(self):
-        if self.config_path:
-            save_config(self.get_cfg(), self.config_path)
-        else:
-            save_config(self.get_cfg())
+        save_config(self.get_cfg(), self.config_path)
 
     def list(self, query=""):
         return [{"id": r["id"], "created": r["created"], "mode": r["mode"], "app": r["app"],
@@ -49,11 +46,16 @@ class Api:
         return True
 
     def reprocess(self, rid, mode):
+        """DGX 失敗時不覆蓋原本的結果（跟錄音當下的編輯模式一樣，失敗就不改）。"""
         r = self.h.get(int(rid))
+        if mode == "edit" and not r.get("selection"):
+            raise ValueError("這筆紀錄沒有選取的文字，不能用編輯模式重新處理")
         cfg = self.get_cfg()
         ctx = {k: r[k] for k in ("app", "bundle", "title", "selection") if r.get(k)}
         text, ok = llm_refine(r["raw"], mode, cfg, ctx)
-        self.h.update(int(rid), text=apply_replacements(text, cfg), mode=mode, ok=int(ok))
+        if not ok:
+            raise RuntimeError("DGX 未回應，紀錄沒有修改")
+        self.h.update(int(rid), text=apply_replacements(text, cfg), mode=mode, ok=1)
         return self.h.get(int(rid))
 
     def copy(self, text):
