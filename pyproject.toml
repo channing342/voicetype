@@ -1,0 +1,23 @@
+[project]
+name = "voicetype"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "mlx-audio>=0.6.1",
+    "mlx-whisper>=0.4.3",
+    "numpy>=2.5.4",
+    "opencc>=1.4.2",
+    "pynput>=1.8.2",
+    "pyobjc-framework-applicationservices>=12.2.2",
+    "pyobjc-framework-webkit>=12.2.2",
+    "rumps>=0.4.0",
+    "sounddevice>=0.5.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+]
+[tool.pytest.ini_options]
+markers = ["e2e: 需要麥克風以外的真實環境（本機 Whisper + DGX）"]

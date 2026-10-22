@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voicetype</title>
+<style>
+:root {
+  --bg: #eef0f3; --panel: #ffffff; --panel-2: #f6f7f9; --line: #e2e5ea;
+  --text: #1c1f24; --muted: #6b7280; --faint: #9aa1ab;
+  --accent: #2563eb; --accent-soft: #e7eefc; --danger: #dc2626; --warn: #b45309;
+  --wave: #c3c8d0; --wave-played: #1c1f24;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17191d; --panel: #1f2227; --panel-2: #262a30; --line: #30353c;
+    --text: #e8eaed; --muted: #9aa1ab; --faint: #6b7280;
+    --accent: #6c9cff; --accent-soft: #1f2b44; --danger: #f87171; --warn: #fbbf24;
+    --wave: #4a505a; --wave-played: #e8eaed;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang TC", sans-serif;
+  display: flex; overflow: hidden; -webkit-user-select: none; user-select: none;
+}
+button, input, select { font: inherit; color: inherit; }
+button {
+  border: 1px solid var(--line); background: var(--panel); border-radius: 8px;
+  padding: 5px 12px; cursor: pointer;
+}
+button:hover { background: var(--panel-2); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--danger); }
+button.armed { background: var(--danger); border-color: var(--danger); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+input[type=text], input[type=search], select {
+  border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 10px; outline: none;
+}
+input:focus { border-color: var(--accent); }
+
+nav {
+  width: 168px; padding: 16px 10px; display: flex; flex-direction: column; gap: 4px;
+  border-right: 1px solid var(--line);
+}
+nav .brand { font-weight: 600; font-size: 16px; padding: 4px 10px 14px; }
+nav a {
+  padding: 7px 10px; border-radius: 8px; color: var(--muted); cursor: pointer; text-decoration: none;
+}
+nav a.on { background: var(--panel); color: var(--text); font-weight: 500; }
+nav .foot { margin-top: auto; padding: 0 10px; font-size: 12px; color: var(--faint); }
+
+main { flex: 1; display: none; min-width: 0; }
+main.on { display: flex; }
+
+/* 歷史紀錄 */
+#history { flex-direction: column; }
+.toolbar { padding: 14px 18px; display: flex; gap: 10px; align-items: center; }
+.toolbar input { flex: 1; }
+.split { flex: 1; display: flex; min-height: 0; padding: 0 18px 18px; gap: 16px; }
+.list { width: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+.item {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; cursor: pointer;
+}
+.item.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.item .pv { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.item .meta, .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.empty { color: var(--faint); text-align: center; padding: 40px 0; }
+
+.detail {
+  flex: 1; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.detail .body { flex: 1; overflow-y: auto; padding: 8px 22px 20px; }
+.dhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 22px 8px; flex-wrap: wrap; }
+.dhead .meta { margin: 0; }
+.text { font-size: 16px; line-height: 1.75; white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
+.label { font-size: 12px; color: var(--muted); margin: 14px 0 4px; }
+.label:first-child { margin-top: 0; }
+.seg { display: flex; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.seg:hover { background: var(--panel-2); }
+.seg .t { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 44px; }
+.seg .s { -webkit-user-select: text; user-select: text; }
+
+.player {
+  margin: 0 22px; background: var(--panel-2); border-radius: 12px; padding: 10px 14px;
+  display: flex; align-items: center; gap: 12px;
+}
+.player button { border: none; background: none; padding: 0; width: 28px; height: 28px; }
+.player canvas { flex: 1; height: 40px; cursor: pointer; min-width: 0; }
+.player .time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
+
+.actions { display: flex; align-items: center; gap: 8px; padding: 14px 22px 18px; flex-wrap: wrap; }
+.seg-ctl { display: inline-flex; background: var(--panel-2); border-radius: 9px; padding: 3px; }
+.seg-ctl button { border: none; background: none; border-radius: 7px; padding: 4px 12px; color: var(--muted); }
+.seg-ctl button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.actions .gap { flex: 1; }
+.info { margin: 0 22px 12px; padding-top: 4px; font-size: 13px; display: grid; grid-template-columns: 96px 1fr; gap: 4px 12px; }
+.info dt { color: var(--muted); }
+.info dd { margin: 0; overflow-wrap: anywhere; }
+.badge-warn { color: var(--warn); }
+
+#selbar {
+  position: fixed; display: none; gap: 6px; padding: 6px; background: var(--panel); z-index: 10;
+  border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.15);
+}
+#selbar input { width: 120px; }
+
+/* 設定 */
+#settings { flex-direction: column; overflow-y: auto; padding: 18px; gap: 16px; }
+.opt {
+  display: flex; gap: 14px; align-items: flex-start; padding: 14px 16px; margin-bottom: 10px;
+  border: 1px solid var(--line); border-radius: 12px; cursor: pointer;
+}
+.opt:hover { background: var(--panel-2); }
+.opt.on { border-color: var(--accent); background: var(--accent-soft); }
+.opt.disabled { opacity: .55; cursor: progress; }
+.opt .dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--faint); margin-top: 3px; flex: none; }
+.opt.on .dot { border: 5px solid var(--accent); }
+.opt .name { font-weight: 600; }
+.opt .sub { font-size: 13px; color: var(--muted); }
+.tag { font-size: 12px; color: var(--muted); margin-left: 8px; font-weight: 400; }
+.tag.warn { color: var(--warn); }
+
+/* 詞彙 */
+#vocab { flex-direction: column; overflow-y: auto; padding: 18px; gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+.card h2 { font-size: 15px; margin: 0 0 4px; }
+.card p.hint { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.row input[type=text] { flex: 1; max-width: 320px; }
+.rtable td:first-child { width: 40%; }
+.words { display: flex; flex-wrap: wrap; gap: 6px; }
+.word {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 10px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2);
+}
+.word button, .rtable button { border: none; background: none; padding: 0 4px; color: var(--faint); }
+.word button:hover, .rtable button:hover { color: var(--danger); }
+.rtable { width: 100%; border-collapse: collapse; }
+.rtable td { padding: 6px 4px; border-bottom: 1px solid var(--line); }
+.rtable td.arrow { color: var(--faint); width: 30px; text-align: center; }
+.rtable td.op { width: 40px; text-align: right; }
+.suggest label { display: inline-flex; align-items: center; gap: 6px; margin: 0 14px 8px 0; }
+.status { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand">Voicetype</div>
+  <a data-tab="history">歷史紀錄</a>
+  <a data-tab="vocab">詞彙管理</a>
+  <a data-tab="settings">設定</a>
+  <div class="foot" id="retention"></div>
+</nav>
+
+<main id="history">
+  <div class="toolbar"><input id="q" type="search" placeholder="搜尋整理後文字或原文"></div>
+  <div class="split">
+    <div class="list" id="list"></div>
+    <div class="detail" id="detail"><div class="empty">選擇左邊的一筆紀錄</div></div>
+  </div>
+</main>
+
+<main id="vocab">
+  <div class="card">
+    <h2>詞彙</h2>
+    <p class="hint">提供給 Whisper 辨識與 DGX 整理，提高專有名詞的正確率。</p>
+    <div class="row"><input id="newWord" type="text" placeholder="新增詞彙，例如 Papaya-VPC"><button class="primary" id="addWord">新增</button></div>
+    <div class="words" id="words"></div>
+  </div>
+  <div class="card">
+    <h2>替換規則</h2>
+    <p class="hint">在 DGX 整理後強制替換（完全比對），DGX 失敗退回原文時也會套用。</p>
+    <div class="row">
+      <input id="rSrc" type="text" placeholder="辨識結果，例如 歐提"><span class="status">→</span>
+      <input id="rDst" type="text" placeholder="替換成，例如 OT"><button class="primary" id="addRepl">新增</button>
+    </div>
+    <table class="rtable" id="repls"></table>
+  </div>
+  <div class="card suggest">
+    <h2>從最近紀錄找詞彙</h2>
+    <p class="hint">請 DGX 掃描最近 50 筆紀錄，找出常出現但還沒收錄的專有名詞。</p>
+    <div class="row"><button id="suggest">開始分析</button><span class="status" id="sugStatus"></span></div>
+    <div id="sugList"></div>
+    <div class="row" id="sugActions" style="display:none"><button class="primary" id="sugAdd">加入勾選的詞彙</button></div>
+  </div>
+</main>
+
+<main id="settings">
+  <div class="card">
+    <h2>語音辨識模型</h2>
+    <p class="hint">在本機 Apple Silicon 上用 MLX 執行。切換後會釋放舊模型、載入新模型；第一次使用需要下載，載入期間的錄音會排隊等待。</p>
+    <div id="asrList"></div>
+    <div class="status" id="asrStatus"></div>
+  </div>
+</main>
+
+<div id="selbar">
+  <button id="selVocab">加入詞彙</button>
+  <input id="selTo" type="text" placeholder="替換成…">
+  <button id="selRepl">加入替換規則</button>
+</div>
+
+<script>
+const MODE = { clean: "清理", organize: "整理", edit: "編輯" };
+const pending = {}; let seq = 0;
+function call(method, ...args) {
+  return new Promise((resolve, reject) => {
+    const id = ++seq; pending[id] = { resolve, reject };
+    window.webkit.messageHandlers.vt.postMessage(JSON.stringify({ id, method, args }));
+  });
+}
+window.__resolve = (id, p) => {
+  const h = pending[id]; delete pending[id];
+  if (h) p.ok ? h.resolve(p.result) : h.reject(new Error(p.error));
+};
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const fmtTime = (t) => new Date(t * 1000).toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+
+function showTab(tab) {
+  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("on", a.dataset.tab === tab));
+  document.querySelectorAll("main").forEach((m) => m.classList.toggle("on", m.id === tab));
+  if (tab === "vocab") loadVocab(); else if (tab === "settings") loadAsr(); else refresh();
+}
+document.querySelectorAll("nav a").forEach((a) => a.onclick = () => showTab(a.dataset.tab));
+
+/* ---------- 歷史紀錄 ---------- */
+let current = null, view = "ai", audio = null, peaks = [];
+async function refresh() {
+  const items = await call("list", $("#q").value.trim());
+  $("#list").innerHTML = items.length ? items.map((r) => `
+    <div class="item ${current && current.id === r.id ? "on" : ""}" data-id="${r.id}">
+      <div class="pv">${esc(r.preview) || "（空白）"}</div>
+      <div class="meta">${fmtTime(r.created)} · ${esc(r.app || "—")} · ${MODE[r.mode] || r.mode} · ${fmtDur(r.duration || 0)}</div>
+    </div>`).join("") : `<div class="empty">${$("#q").value ? "沒有符合的紀錄" : "還沒有紀錄"}</div>`;
+  document.querySelectorAll(".item").forEach((el) => el.onclick = () => open(+el.dataset.id));
+  if (!current && items.length) open(items[0].id);
+}
+let qTimer; $("#q").oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(refresh, 200); };
+
+async function open(id) {
+  current = await call("get", id);
+  if (!current) return;
+  document.querySelectorAll(".item").forEach((el) => el.classList.toggle("on", +el.dataset.id === id));
+  renderDetail();
+  loadAudio(id);
+}
+
+function bodyHtml() {
+  const r = current;
+  if (view === "ai") return `<div class="text">${esc(r.text)}</div>`;
+  if (view === "raw") return r.mode === "edit"
+    ? `<div class="label">語音指令</div><div class="text">${esc(r.raw)}</div><div class="label">選取的文字</div><div class="text">${esc(r.selection)}</div>`
+    : `<div class="text">${esc(r.raw)}</div>`;
+  return r.segments.length ? r.segments.map((s) => `<div class="seg" data-t="${s.start}"><span class="t">${fmtDur(s.start)}</span><span class="s">${esc(s.text)}</span></div>`).join("")
+    : `<div class="empty">沒有分段資料</div>`;
+}
+
+function renderDetail(showInfo = false) {
+  const r = current;
+  $("#detail").innerHTML = `
+    <div class="dhead">
+      <div class="seg-ctl">
+        <button data-v="ai" class="${view === "ai" ? "on" : ""}">AI 整理後</button>
+        <button data-v="raw" class="${view === "raw" ? "on" : ""}">原文</button>
+        <button data-v="seg" class="${view === "seg" ? "on" : ""}">分段</button>
+      </div>
+      <span class="meta">${fmtTime(r.created)} · ${esc(r.app || "—")} · ${MODE[r.mode] || r.mode}${r.ok ? "" : ' · <span class="badge-warn">DGX 失敗</span>'}</span>
+    </div>
+    <div class="body" id="dbody">${bodyHtml()}</div>
+    ${showInfo ? `<dl class="info">
+      <dt>時間</dt><dd>${new Date(r.created * 1000).toLocaleString("zh-TW", { hour12: false })}</dd>
+      <dt>模式</dt><dd>${MODE[r.mode] || r.mode}</dd>
+      <dt>App</dt><dd>${esc(r.app || "—")}${r.bundle ? ` <span class="meta">${esc(r.bundle)}</span>` : ""}</dd>
+      <dt>視窗標題</dt><dd>${esc(r.title || "—")}</dd>
+      <dt>錄音長度</dt><dd>${(r.duration || 0).toFixed(1)} 秒</dd>
+      <dt>辨識耗時</dt><dd>${(r.t_transcribe || 0).toFixed(2)} 秒</dd>
+      <dt>DGX 耗時</dt><dd>${(r.t_llm || 0).toFixed(2)} 秒</dd>
+      <dt>DGX 結果</dt><dd>${r.ok ? "成功" : '<span class="badge-warn">失敗，使用原文</span>'}</dd>
+      <dt>模型</dt><dd>${esc(r.model || "—")}</dd></dl>` : ""}
+    <div class="player">
+      <button id="play" title="播放"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path id="playIcon" d="M7 4.5v15l13-7.5z"/></svg></button>
+      <canvas id="wave"></canvas>
+      <span class="time" id="ptime">${fmtDur(r.duration || 0)}</span>
+    </div>
+    <div class="actions">
+      <button id="copy">複製</button>
+      <select id="rmode">${Object.entries(MODE).filter(([k]) => k !== "edit" || r.selection).map(([k, v]) => `<option value="${k}" ${k === r.mode ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <button id="redo">重新處理</button>
+      <span class="gap"></span>
+      <button id="info" class="${showInfo ? "on" : ""}">資訊</button>
+      <button id="del" class="danger">刪除</button>
+    </div>`;
+  document.querySelectorAll(".seg-ctl button").forEach((b) => b.onclick = () => { view = b.dataset.v; renderDetail(showInfo); });
+  document.querySelectorAll(".seg").forEach((el) => el.onclick = (e) => { if (!window.getSelection().toString()) seek(+el.dataset.t, true); });
+  $("#copy").onclick = async () => { await call("copy", view === "raw" ? r.raw : r.text); flashBtn($("#copy"), "已複製"); };
+  $("#redo").onclick = async () => {
+    const b = $("#redo"); b.disabled = true; b.textContent = "DGX 處理中…";
+    try { current = await call("reprocess", r.id, $("#rmode").value); view = "ai"; renderDetail(showInfo); refresh(); }
+    catch (e) { b.textContent = "失敗"; b.disabled = false; }
+  };
+  $("#info").onclick = () => renderDetail(!showInfo);
+  $("#del").onclick = async () => {
+    const b = $("#del");
+    if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "確認刪除"; setTimeout(() => { b.classList.remove("armed"); b.textContent = "刪除"; }, 3000); return; }
+    await call("delete", r.id); current = null; stopAudio();
+    $("#detail").innerHTML = '<div class="empty">已刪除</div>'; refresh();
+  };
+  $("#play").onclick = togglePlay;
+  $("#wave").onclick = (e) => { const c = e.currentTarget; seek((e.offsetX / c.clientWidth) * (audio ? audio.duration : 0), true); };
+  drawWave();
+}
+function flashBtn(b, t) { const o = b.textContent; b.textContent = t; setTimeout(() => b.textContent = o, 1200); }
+
+/* 播放器與波形 */
+function stopAudio() { if (audio) { audio.pause(); audio = null; } }
+async function loadAudio(id) {
+  stopAudio(); peaks = [];
+  const b64 = await call("audio", id);
+  if (!b64 || !current || current.id !== id) return;
+  audio = new Audio("data:audio/wav;base64," + b64);
+  audio.ontimeupdate = () => { $("#ptime") && ($("#ptime").textContent = fmtDur(audio.currentTime)); drawWave(); };
+  audio.onended = () => { setIcon(false); drawWave(); };
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const buf = await new AudioContext().decodeAudioData(bytes.buffer);
+  const data = buf.getChannelData(0), n = 160, step = Math.max(1, Math.floor(data.length / n));
+  peaks = Array.from({ length: n }, (_, i) => {
+    let m = 0; for (let j = i * step; j < (i + 1) * step && j < data.length; j++) m = Math.max(m, Math.abs(data[j]));
+    return m;
+  });
+  const top = Math.max(...peaks, 1e-3); peaks = peaks.map((p) => p / top);
+  drawWave();
+}
+function drawWave() {
+  const c = $("#wave"); if (!c) return;
+  const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const n = Math.max(1, Math.floor(w / 4)), progress = audio && audio.duration ? audio.currentTime / audio.duration : 0;
+  for (let i = 0; i < n; i++) {
+    const p = peaks.length ? peaks[Math.floor(i * peaks.length / n)] : 0.08;
+    const bh = Math.max(2, p * (h - 4));
+    g.fillStyle = (i / n) < progress ? css.getPropertyValue("--wave-played") : css.getPropertyValue("--wave");
+    g.beginPath(); g.roundRect(i * 4, (h - bh) / 2, 2, bh, 1); g.fill();
+  }
+}
+function setIcon(playing) { const p = $("#playIcon"); if (p) p.setAttribute("d", playing ? "M6 4.5h4v15H6zM14 4.5h4v15h-4z" : "M7 4.5v15l13-7.5z"); }
+function togglePlay() { if (!audio) return; if (audio.paused) { audio.play(); setIcon(true); } else { audio.pause(); setIcon(false); } }
+function seek(t, play) { if (!audio) return; audio.currentTime = t; if (play) { audio.play(); setIcon(true); } drawWave(); }
+window.onresize = drawWave;
+
+/* 選取文字 → 加入詞彙／替換規則 */
+document.addEventListener("mouseup", (e) => {
+  if (e.target.closest("#selbar")) return;
+  setTimeout(() => {
+    const s = window.getSelection(), t = s.toString().trim();
+    const bar = $("#selbar");
+    if (!t || t.length > 40 || !s.anchorNode || !$("#detail").contains(s.anchorNode)) { bar.style.display = "none"; return; }
+    const r = s.getRangeAt(0).getBoundingClientRect();
+    bar.dataset.text = t; $("#selTo").value = "";
+    bar.style.display = "flex";
+    bar.style.left = Math.min(window.innerWidth - bar.offsetWidth - 8, Math.max(8, r.left)) + "px";
+    bar.style.top = Math.max(8, r.top - bar.offsetHeight - 8) + "px";
+  });
+});
+$("#selVocab").onclick = async () => { await call("vocab_add", $("#selbar").dataset.text); flashBtn($("#selVocab"), "已加入"); setTimeout(() => $("#selbar").style.display = "none", 600); };
+$("#selRepl").onclick = async () => {
+  const to = $("#selTo").value.trim(); if (!to) { $("#selTo").focus(); return; }
+  await call("repl_set", $("#selbar").dataset.text, to); flashBtn($("#selRepl"), "已加入"); setTimeout(() => $("#selbar").style.display = "none", 600);
+};
+
+/* ---------- 詞彙管理 ---------- */
+function renderVocab(v) {
+  $("#words").innerHTML = v.vocabulary.map((w) => `<span class="word">${esc(w)}<button title="刪除" data-w="${esc(w)}">✕</button></span>`).join("") || '<span class="status">尚無詞彙</span>';
+  document.querySelectorAll(".word button").forEach((b) => b.onclick = async () => renderVocab(await call("vocab_remove", b.dataset.w)));
+  const rs = Object.entries(v.replacements);
+  $("#repls").innerHTML = rs.map(([s, d]) => `<tr><td>${esc(s)}</td><td class="arrow">→</td><td>${esc(d)}</td><td class="op"><button title="刪除" data-s="${esc(s)}">✕</button></td></tr>`).join("") || '<tr><td class="status">尚無替換規則</td></tr>';
+  document.querySelectorAll(".rtable button").forEach((b) => b.onclick = async () => renderVocab(await call("repl_remove", b.dataset.s)));
+}
+async function loadVocab() { renderVocab(await call("vocab")); }
+$("#addWord").onclick = async () => { const w = $("#newWord").value.trim(); if (!w) return; renderVocab(await call("vocab_add", w)); $("#newWord").value = ""; };
+$("#newWord").onkeydown = (e) => e.key === "Enter" && $("#addWord").click();
+$("#addRepl").onclick = async () => {
+  const s = $("#rSrc").value.trim(), d = $("#rDst").value.trim(); if (!s) return;
+  renderVocab(await call("repl_set", s, d)); $("#rSrc").value = $("#rDst").value = "";
+};
+$("#suggest").onclick = async () => {
+  const b = $("#suggest"); b.disabled = true; $("#sugStatus").textContent = "DGX 分析中…"; $("#sugList").innerHTML = ""; $("#sugActions").style.display = "none";
+  try {
+    const words = await call("vocab_suggest");
+    $("#sugStatus").textContent = words.length ? `找到 ${words.length} 個建議` : "沒有新的建議";
+    $("#sugList").innerHTML = words.map((w) => `<label><input type="checkbox" value="${esc(w)}" checked>${esc(w)}</label>`).join("");
+    $("#sugActions").style.display = words.length ? "flex" : "none";
+  } catch (e) { $("#sugStatus").textContent = "分析失敗：" + e.message; }
+  b.disabled = false;
+};
+$("#sugAdd").onclick = async () => {
+  const ws = [...document.querySelectorAll("#sugList input:checked")].map((i) => i.value);
+  renderVocab(await call("vocab_add", ws)); $("#sugList").innerHTML = ""; $("#sugActions").style.display = "none";
+  $("#sugStatus").textContent = `已加入 ${ws.length} 個詞彙`;
+};
+
+/* ---------- 設定：辨識模型 ---------- */
+let asrPoll;
+function renderAsr(a) {
+  $("#asrList").innerHTML = a.choices.map((c) => `
+    <div class="opt ${c.id === a.current ? "on" : ""} ${a.loading ? "disabled" : ""}" data-id="${esc(c.id)}">
+      <span class="dot"></span>
+      <div>
+        <div class="name">${esc(c.name)}<span class="tag">${esc(c.size)}</span>${c.downloaded ? "" : '<span class="tag warn">需下載</span>'}</div>
+        <div class="sub">${esc(c.note)}</div>
+      </div>
+    </div>`).join("");
+  const cur = a.choices.find((c) => c.id === a.current);
+  $("#asrStatus").innerHTML = a.loading ? `正在載入 ${esc(cur ? cur.name : a.current)}…${cur && !cur.downloaded ? `（首次使用，下載約 ${esc(cur.size)}）` : ""}`
+    : a.error ? `<span class="badge-warn">載入失敗：${esc(a.error)}</span>` : `使用中：${esc(cur ? cur.name : a.current)}`;
+  document.querySelectorAll(".opt").forEach((el) => el.onclick = async () => {
+    if (a.loading || el.dataset.id === a.current) return;
+    renderAsr(await call("asr_set", el.dataset.id)); pollAsr();
+  });
+}
+async function loadAsr() { const a = await call("asr"); renderAsr(a); if (a.loading) pollAsr(); }
+function pollAsr() {
+  clearTimeout(asrPoll);
+  asrPoll = setTimeout(async () => {
+    const a = await call("asr"); renderAsr(a);
+    if (a.loading && document.querySelector("#settings.on")) pollAsr();
+  }, 1000);
+}
+
+call("settings").then((s) => $("#retention").textContent = `紀錄保留 ${s.history_days} 天`);
+showTab(["vocab", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "history");
+</script>
+</body>
+</html>

@@ -16,6 +16,7 @@
 | 詞彙與替換規則 | 詞彙會同時提供給 Whisper 和 DGX；替換規則（例如「歐提 → OT」）在最後強制套用 |
 | 歷史紀錄 | **⌥⌘,** 或選單列 →「歷史紀錄…」：搜尋、播放錄音、切換 AI 整理後／原文／分段、複製、換模式重新處理、刪除 |
 | 詞彙管理 | 選單列 →「詞彙管理…」；也可以在歷史紀錄中選取一段文字直接加入，或請 DGX 從最近的紀錄建議詞彙 |
+| 切換辨識模型 | 管理介面 →「設定」：Whisper Large V3 Turbo／Qwen3-ASR 0.6B／Qwen3-ASR 1.7B，點選就切換；第一次使用會自動下載 |
 | 錄音浮動視窗 | Classic（波形加狀態列）、Mini（只有波形）、不顯示，三種樣式從選單列切換 |
 | 不污染剪貼簿 | 貼上後還原原本的剪貼簿，Raycast、Paste 這類剪貼簿管理器也不會記錄 |
 | DGX 失敗時 | 超過逾時時間（預設 10 秒）就改貼 Whisper 原文；編輯模式則不修改原本的文字 |
@@ -29,7 +30,7 @@ flowchart LR
     K["快捷鍵 ⌘, ⌘. ⌘;"] -->|CGEventTap| A[選單列 App]
     A --> R[錄音 16kHz]
     A --> C[情境：App、視窗標題、選取文字]
-    R --> W[Whisper Large V3 Turbo<br>mlx，本機 GPU]
+    R --> W[Whisper Turbo 或 Qwen3-ASR<br>MLX，本機 GPU]
     W --> L[DGX Qwen3.8-Flash-Next]
     C --> L
     L --> X[替換規則]
@@ -81,6 +82,7 @@ launchctl load ~/Library/LaunchAgents/com.hyjay.voicetype.plist     # 停用時�
 | 欄位 | 預設 | 說明 |
 |---|---|---|
 | `hotkeys` | ⌘, ⌘. ⌘; ⌥⌘, | 清理、整理、編輯、打開管理介面；建議從選單列錄製 |
+| `asr_model` | `mlx-community/whisper-large-v3-turbo` | 辨識模型，建議從管理介面「設定」切換；也可以填其他 mlx-audio 支援的 repo |
 | `hold_threshold` | 0.4 | 按住超過幾秒算長按 |
 | `llm_timeout` | 10 | DGX 逾時秒數，選單列可以快速切換 |
 | `history_days` | 30 | 歷史紀錄保留天數 |
