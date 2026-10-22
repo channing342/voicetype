@@ -10,16 +10,16 @@ import time
 import numpy as np
 import Quartz
 import rumps
-from AppKit import NSApplication, NSMenu, NSMenuItem
+from AppKit import NSApplication, NSMenu, NSMenuItem, NSSound
 from pynput import keyboard
 from PyObjCTools import AppHelper
 
 import macos
-from core import (CONFIG_PATH, KEY_ESC, MODE_NAMES, SAMPLE_RATE, KeyLogic, Recorder, apply_replacements,
-                  is_too_short_or_silent, llm_refine, load_config, match_hotkey, parse_capture, save_config,
-                  transcribe)
+from core import (CONFIG_PATH, KEY_ESC, MOD_FLAGS, MODE_NAMES, RECORD_MODES, SAMPLE_RATE, KeyLogic, Recorder,
+                  apply_replacements, clean_audio, is_too_short_or_silent, llm_refine, load_config, match_hotkey, parse_capture,
+                  save_config, transcribe, translate, translate_kind, TRANSLATE_LABELS)
 from history import History
-from hud import Hud
+from hud import Hud, TranslatePanel
 from window import Api, MainWindow
 
 ICONS = {"idle": "🎙", "recording": "🔴", "busy": "⏳", "paused": "⏸"}
@@ -27,6 +27,10 @@ STAGES = {"transcribe": "辨識中…", "llm": "DGX 整理中…"}
 FAST, SLOW = 1 / 30, 0.5  # 有畫面要動時 30fps；閒置時 2 次/秒，避免空轉吃 CPU
 PURGE_EVERY = 3600  # 常駐不重開，每小時刪一次過期紀錄
 TAP_CHECK = 2  # 每 2 秒檢查 event tap 是否還活著
+SHIFT = MOD_FLAGS["shift"]
+# 提示音會被剛打開的麥克風錄進去；實測音量 0.4 時錄到的大小跟環境噪音差不多（RMS 約 0.005），
+# 保險起見切掉開頭 0.25 秒。使用者聽到提示音才開口，切不到話
+CUE_SKIP = 0.25
 
 
 class App(rumps.App):
@@ -37,11 +41,15 @@ class App(rumps.App):
         first_run = not CONFIG_PATH.exists()
         self.cfg = load_config()
         self.state, self.mode, self.capturing, self.last_text = "idle", None, None, ""
+        self.swallow_up = None  # ⇧ 結束錄音時，對應的 keyUp 也要吞掉
         self.ctx, self.stage, self.stage_start, self.flash = {}, None, 0.0, ("", 0.0)
         self.ctx_thread = threading.Thread()
         self.keys = KeyLogic(self.cfg["hold_threshold"])
         self.rec, self.hud, self.history, self.purged = Recorder(), Hud(), History(), 0.0
         self.listener, self.tap_disabled, self.tap_checked = None, False, 0.0
+        self.tpanel, self.tr_seq = TranslatePanel(lambda t: macos.copy_text(t, transient=True),
+                                                  self.replace_selection, self.retry_translate,
+                                                  theme=lambda: self.cfg["theme"]), 0
         # ponytail: MLX 的 GPU stream 綁執行緒，所有辨識都在同一條 worker 執行
         self.jobs = queue.Queue()
         self.switch_asr()  # 預熱模型（也設定 asr_state，要在 Api 之前）
@@ -63,14 +71,17 @@ class App(rumps.App):
             AppHelper.callAfter(self.win.show, "home")
 
     def _edit_menu(self):
-        """Accessory App 沒有主選單，WKWebView 裡的 ⌘C／⌘V／⌘A 需要 Edit 選單才會生效。"""
-        main, edit = NSMenu.alloc().init(), NSMenu.alloc().initWithTitle_("Edit")
-        for title, sel, key in (("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
-                                ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")):
-            edit.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, key))
-        holder = NSMenuItem.alloc().init()
-        holder.setSubmenu_(edit)
-        main.addItem_(holder)
+        """Accessory App 沒有主選單，管理介面的 ⌘C／⌘V／⌘A（Edit）與 ⌘M／⌘W（Window）要自己建選單才會生效。"""
+        main = NSMenu.alloc().init()
+        for name, items in (("Edit", (("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
+                                      ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a"))),
+                            ("Window", (("Minimize", "performMiniaturize:", "m"), ("Close", "performClose:", "w")))):
+            menu = NSMenu.alloc().initWithTitle_(name)
+            for title, sel, key in items:
+                menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, key))
+            holder = NSMenuItem.alloc().init()
+            holder.setSubmenu_(menu)
+            main.addItem_(holder)
         NSApplication.sharedApplication().setMainMenu_(main)
 
     def build_menu(self):
@@ -90,7 +101,9 @@ class App(rumps.App):
             rumps.MenuItem(f"打開 Voicetype（{hk['window']['label']}）", callback=lambda _: self.win.show("home")),
             None,
             *[rumps.MenuItem(f"開始／結束錄音：{MODE_NAMES[m]}（{hk[m]['label']}）",
-                             callback=lambda _, m=m: self.toggle(m)) for m in ("clean", "organize")],
+                             callback=lambda _, m=m: self.toggle(m)) for m in ("clean", "organize", "english")],
+            rumps.MenuItem(f"翻譯選取的文字（{hk['translate']['label']}）",
+                           callback=lambda _: threading.Thread(target=self.translate_selection, daemon=True).start()),
             None,
             rumps.MenuItem("歷史紀錄…", callback=lambda _: self.win.show("history")),
             rumps.MenuItem("詞彙管理…", callback=lambda _: self.win.show("vocab")),
@@ -100,11 +113,18 @@ class App(rumps.App):
             rumps.MenuItem("快捷鍵…", callback=lambda _: self.win.show("home")),
             hud_menu, timeout_menu,
             rumps.MenuItem("暫停", callback=self.toggle_pause),
+            self._check_item("麥克風就緒提示音", "sound_cue"),
+            self._check_item("辨識前去除靜音", "audio_cleanup"),
             None,
             rumps.MenuItem("開啟設定檔", callback=lambda _: subprocess.run(["open", "-t", str(CONFIG_PATH)])),
             rumps.MenuItem("重新載入設定", callback=self.reload),
             rumps.MenuItem("結束", callback=rumps.quit_application),
         ]
+
+    def _check_item(self, title, key):
+        item = rumps.MenuItem(title, callback=lambda _: self.set_cfg(key, not self.cfg[key]))
+        item.state = int(bool(self.cfg[key]))
+        return item
 
     def switch_asr(self):
         """在 worker 佇列排一個預熱工作：worker 會釋放舊模型、載入新模型（含首次下載）。"""
@@ -138,6 +158,10 @@ class App(rumps.App):
         if not self.listener.is_alive():
             raise RuntimeError("快捷鍵功能還沒啟用，請先允許「輔助使用」權限")
         self.capturing = mode
+
+    def purge_soon(self):
+        """保留天數改短後，下一次 tick 就刪除過期紀錄，不用等一小時。"""
+        self.purged = 0.0
 
     def config_changed(self):
         AppHelper.callAfter(self.build_menu)
@@ -226,6 +250,13 @@ class App(rumps.App):
             print(f"開啟麥克風失敗：{fut.exception()!r}", flush=True)
             self.set_flash("❌ 無法開啟麥克風", 2)
             self.state = "idle"
+        elif not fut.exception() and self.state == "recording" and self.cfg["sound_cue"]:
+            AppHelper.callAfter(self.play_cue)
+
+    def play_cue(self):
+        sound = NSSound.soundNamed_("Tink")
+        sound.setVolume_(0.4)
+        sound.play()
 
     def capture_context(self, ctx):
         try:
@@ -240,20 +271,24 @@ class App(rumps.App):
         self.set_flash(message, 1.2)
         self.state = "idle"
 
-    def finish(self, mode):
+    def finish(self, mode, send=False):
+        """send：結束時按著 Shift，貼上後再按 Enter 送出。"""
         self.stage, self.stage_start = "transcribe", time.time()
         self.state = "busy"
-        threading.Thread(target=self._finish, args=(mode,), daemon=True).start()
+        threading.Thread(target=self._finish, args=(mode, send), daemon=True).start()
 
-    def _finish(self, mode):
+    def _finish(self, mode, send=False):
         try:
             audio = self.rec.stop().result()
+            if self.cfg["sound_cue"]:
+                audio = audio[int(CUE_SKIP * SAMPLE_RATE):]
             self.ctx_thread.join(2)  # 很短的錄音可能比讀取情境還快結束
             ctx = dict(self.ctx)
             if mode == "edit" and not ctx.get("selection") and not self.ctx_thread.is_alive():
                 ctx["selection"] = macos.read_selection()  # AX 讀不到（部分 Electron App）才用 ⌘C
             if self.cfg["context"]["clipboard"]:
                 ctx["clipboard"] = macos.clipboard_text()[:2000]
+            ctx["send"] = send
         except Exception as e:  # job 沒進佇列就不會有 worker 把狀態改回 idle
             print(f"結束錄音失敗：{e!r}", flush=True)
             self.set_flash(f"❌ 處理失敗：{type(e).__name__}", 2)
@@ -286,24 +321,82 @@ class App(rumps.App):
             if down:
                 self.cancel("已取消")
             return None
+        if keycode == KEY_ESC and self.tpanel.shown:  # 只在翻譯視窗開著時攔截 Esc
+            if down:
+                AppHelper.callAfter(self.tpanel.hide)
+            return None
         if not down:
+            if keycode == self.swallow_up:
+                self.swallow_up = None
+                return None
             if keycode == self.keys.down_key:  # 長按放開（修飾鍵可能已先放開，只比 keycode）
                 action = self.keys.up(keycode, now, self.state == "recording", self.mode)
                 if action:
-                    self.finish(action[1])
+                    self.finish(action[1], send=bool(flags & SHIFT))
                 return None
             return event if match_hotkey(self.cfg["hotkeys"], keycode, flags) is None else None
         mode = match_hotkey(self.cfg["hotkeys"], keycode, flags)
         if mode is None:
-            return event
+            send_mode = self.shift_stop(keycode, flags)
+            if send_mode is None:
+                return event
+            if not repeat:
+                self.keys.down(send_mode, keycode, now, True)
+                self.swallow_up = keycode
+                self.finish(send_mode, send=True)
+            return None
         if mode == "window":
             if not repeat:
                 AppHelper.callAfter(self.win.show, "home")
+            return None
+        if mode == "translate":
+            if not repeat:  # 讀選取可能要 ⌘C 並等剪貼簿，不能在 event tap 執行緒做
+                threading.Thread(target=self.translate_selection, daemon=True).start()
             return None
         if not repeat and self.state in ("idle", "recording"):
             action, m = self.keys.down(mode, keycode, now, self.state == "recording")
             self.start(m) if action == "start" else self.finish(m)
         return None
+
+    def shift_stop(self, keycode, flags):
+        """錄音中按 ⇧ + 錄音快捷鍵：回傳要結束的模式（貼上後按 Enter）；不是這種情況回傳 None。"""
+        if self.state != "recording" or not flags & SHIFT:
+            return None
+        m = match_hotkey(self.cfg["hotkeys"], keycode, flags & ~SHIFT)
+        return m if m in RECORD_MODES and "shift" not in self.cfg["hotkeys"][m]["mods"] else None
+
+    # ---------- 選取翻譯：背景執行緒讀選取、呼叫 DGX，浮動視窗只在主執行緒更新 ----------
+    def translate_selection(self):
+        """視窗開著時再按一次：選取沒變（或沒選取）就關閉，選了新的文字就換成新的翻譯。"""
+        text = macos.read_selection().strip()  # AX 讀不到才用 ⌘C；這是使用者主動按的，可以送 ⌘C
+        if self.tpanel.shown and (not text or text == self.tpanel.source):
+            AppHelper.callAfter(self.tpanel.hide)
+            return
+        anchor = macos.selection_bounds()
+        if not text:
+            AppHelper.callAfter(self.tpanel.show_notice, "請先選取文字", anchor, 1.5)
+            return
+        self.run_translate(text, anchor)
+
+    def run_translate(self, text, anchor):
+        self.tr_seq += 1
+        seq = self.tr_seq
+        AppHelper.callAfter(self.tpanel.show_loading, text, anchor)
+        out, ok, truncated = translate(text, self.cfg)
+        if seq != self.tr_seq:  # 等 DGX 時已經按了新的翻譯
+            return
+        if ok:
+            AppHelper.callAfter(self.tpanel.show_result, apply_replacements(out, self.cfg), truncated,
+                                TRANSLATE_LABELS[translate_kind(text)])
+        else:
+            AppHelper.callAfter(self.tpanel.show_error, "DGX 未回應，請稍後重試")
+
+    def retry_translate(self, source):
+        threading.Thread(target=self.run_translate, args=(source, None), daemon=True).start()
+
+    def replace_selection(self, text):
+        """翻譯視窗不會讓 Voicetype 變成使用中的 App，⌘V 會貼回原本的選取。"""
+        threading.Thread(target=macos.paste, args=(text,), daemon=True).start()
 
     def save_capture(self, mode, keycode, flags, ch):
         """主執行緒：intercept 經 AppHelper.callAfter 轉過來。"""
@@ -329,8 +422,9 @@ class App(rumps.App):
                         self.asr_state = {"loading": False, "error": repr(e)}
                         raise
                     hk = self.cfg["hotkeys"]
-                    keys = "／".join(f"{hk[m]['label']} {MODE_NAMES[m]}" for m in ("clean", "organize", "edit"))
-                    print(f"就緒：{keys}（短按切換、長按說話，Esc 取消）；{hk['window']['label']} 打開管理介面", flush=True)
+                    keys = "／".join(f"{hk[m]['label']} {MODE_NAMES[m]}" for m in RECORD_MODES)
+                    print(f"就緒：{keys}（短按切換、長按說話，Esc 取消）；{hk['translate']['label']} 翻譯選取；"
+                          f"{hk['window']['label']} 打開管理介面", flush=True)
                 else:
                     self.process(audio, mode, ctx)
             except Exception as e:
@@ -347,6 +441,7 @@ class App(rumps.App):
         if is_too_short_or_silent(audio, self.cfg):
             self.set_flash("已略過（太短或無聲）", 1.5)
             return
+        audio = clean_audio(audio, self.cfg)  # 歷史紀錄也存清理後的版本，分段時間才對得上播放
         t0 = time.time()
         raw, segments = transcribe(audio, self.cfg)
         t1 = time.time()
@@ -362,7 +457,10 @@ class App(rumps.App):
         else:
             self.last_text = text
             macos.paste(text)
-            self.set_flash("✅ 已貼上" if ok else "⚠️ DGX 未回應，已貼上原文", 0.8 if ok else 2)
+            if ctx.get("send"):
+                macos.press_return()
+            self.set_flash(("✅ 已送出" if ctx.get("send") else "✅ 已貼上") if ok else "⚠️ DGX 未回應，已貼上原文",
+                           0.8 if ok else 2)
         self.history.add(audio, mode=mode, app=ctx.get("app", ""), bundle=ctx.get("bundle", ""),
                          title=ctx.get("title", ""), duration=len(audio) / SAMPLE_RATE, raw=raw, text=text,
                          segments=segments, ok=int(ok), t_transcribe=t1 - t0, t_llm=t2 - t1,

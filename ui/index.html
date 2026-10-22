@@ -314,6 +314,14 @@ main.on { display: flex; }
     <div class="row"><button class="primary" id="llmSave">儲存</button><button id="llmTest">測試連線</button><span class="status" id="llmStatus"></span></div>
   </div>
   <div class="card">
+    <h2>歷史紀錄</h2>
+    <p class="hint">錄音與文字存在這台 Mac，超過保留天數的紀錄會自動刪除（啟動時與之後每小時檢查一次）。改短之後，超過天數的舊紀錄會馬上刪除。</p>
+    <div class="form">
+      <label>保留天數<input id="historyDays" type="number" min="1" max="3650" step="1"></label>
+    </div>
+    <div class="row"><button class="primary" id="historySave">儲存</button><span class="status" id="historyStatus"></span></div>
+  </div>
+  <div class="card">
     <h2>語音辨識模型</h2>
     <p class="hint">在本機 Apple Silicon 上用 MLX 執行。切換後會釋放舊模型、載入新模型；第一次使用需要下載，載入期間的錄音會排隊等待。</p>
     <div id="asrList"></div>
@@ -328,7 +336,7 @@ main.on { display: flex; }
 </div>
 
 <script>
-const MODE = { clean: "清理", organize: "整理", edit: "編輯" };
+const MODE = { clean: "清理", organize: "整理", english: "說中文出英文", edit: "編輯" };
 const pending = {}; let seq = 0;
 function call(method, ...args) {
   return new Promise((resolve, reject) => {
@@ -549,7 +557,15 @@ function renderAsr(a) {
     renderAsr(await call("asr_set", el.dataset.id)); pollAsr();
   });
 }
-async function loadAsr() { const a = await call("asr"); renderAsr(a); if (a.loading) pollAsr(); loadLlm(); }
+async function loadAsr() { const a = await call("asr"); renderAsr(a); if (a.loading) pollAsr(); loadLlm(); loadHistoryDays(); }
+async function loadHistoryDays() { $("#historyDays").value = (await call("settings")).history_days; }
+$("#historySave").onclick = async () => {
+  try {
+    const s = await call("history_days_set", $("#historyDays").value);
+    $("#historyStatus").innerHTML = `<span class="ok-text">已儲存，保留 ${s.history_days} 天</span>`;
+    call("home").then(renderSide);
+  } catch (e) { $("#historyStatus").innerHTML = `<span class="badge-warn">${esc(errText(e))}</span>`; }
+};
 
 /* ---------- 設定：LLM ---------- */
 const errText = (e) => e.message.replace(/^\w+Error\(['"]|['"]\)$/g, "");
@@ -580,7 +596,9 @@ function pollAsr() {
 const DESC = {
   clean: "口語 → 乾淨文字，只去贅字、補標點",
   organize: "零散想法 → 有條理的段落或條列",
+  english: "說中文 → 自然的英文，直接貼上",
   edit: "先選取文字，再說出要怎麼改",
+  translate: "選取文字後按一下：英文等外文翻成中文、中文翻成英文，顯示在浮動視窗",
   window: "隨時叫出這個視窗",
 };
 const PERMS = [["accessibility", "輔助使用", "快捷鍵與貼上"], ["input", "輸入監控", "攔截快捷鍵"], ["microphone", "麥克風", "錄音"]];
@@ -616,7 +634,7 @@ function renderHome(h) {
       <p>macOS 需要允許「輔助使用」，Voicetype 才能攔截快捷鍵並把文字貼到其他 App。到「系統設定 → 隱私權與安全性 → 輔助使用」把 Voicetype 執行的程式（終端機，或 LaunchAgent 用的 python）打開；允許後幾秒內會自動啟用，沒有的話按「重新啟動」。</p>
       <div class="row"><button class="primary" data-open="accessibility">打開輔助使用設定</button><button id="askPerm">再次請求授權</button><button id="restart">重新啟動 Voicetype</button></div>
     </div>`;
-  $("#modes").innerHTML = ["clean", "organize", "edit", "window"].map((m) => {
+  $("#modes").innerHTML = ["clean", "organize", "english", "edit", "translate", "window"].map((m) => {
     const hk = h.hotkeys[m], def = h.defaults[m], m_ = msgs[m];
     const changed = hk.keycode !== def.keycode || [...hk.mods].sort().join() !== [...def.mods].sort().join();
     return `<div class="mrow">
@@ -669,17 +687,23 @@ window.captureDone = (r) => {
 $("#asrCard").onclick = () => showTab("settings");
 
 /* 主題 */
-function setTheme(t) {
+// 存進 config.json（翻譯浮動視窗跟著變）；localStorage 只是讓頁面一打開就套用，不會先閃一下別的主題
+function setTheme(t, save = true) {
   if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
   document.querySelectorAll("#theme button").forEach((b) => b.classList.toggle("on", b.dataset.t === t));
   try { localStorage.setItem("theme", t); } catch (e) {}
   drawWave();
+  if (save) call("theme_set", t || "system").catch(() => {});
 }
 document.querySelectorAll("#theme button").forEach((b) => b.onclick = () => setTheme(b.dataset.t));
 let savedTheme = ""; try { savedTheme = localStorage.getItem("theme") || ""; } catch (e) {}
-setTheme(savedTheme);
+setTheme(savedTheme, false);
 
-call("home").then(renderSide);  // 側欄在每個分頁都要有內容
+call("home").then((h) => {  // 側欄在每個分頁都要有內容
+  renderSide(h);
+  const t = h.theme === "system" ? "" : h.theme;
+  if (t !== savedTheme) setTheme(t, false);  // 以設定檔為準（例如手動改了 config.json）
+});
 showTab(TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "home");
 </script>
 </body>

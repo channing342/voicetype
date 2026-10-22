@@ -230,6 +230,80 @@ def test_recorder_stop_right_after_start_still_closes_mic(monkeypatch):
     assert all(s.closed for s in FakeStream.opened) and len(FakeStream.opened) == 3
 
 
+def test_default_hotkeys_for_translate_and_english_do_not_clash():
+    hk = core.DEFAULTS["hotkeys"]
+    cmd, alt = core.MOD_FLAGS["cmd"], core.MOD_FLAGS["alt"]
+    assert core.match_hotkey(hk, 39, cmd) == "translate"
+    assert core.match_hotkey(hk, 47, cmd | alt) == "english"
+    assert core.match_hotkey(hk, 47, cmd) == "organize"
+    keys = [(v["keycode"], tuple(sorted(v["mods"]))) for v in hk.values()]
+    assert len(set(keys)) == len(keys) and set(core.MODE_NAMES) == set(hk)
+
+
+def test_translate_kind():
+    assert core.translate_kind("Hello world, this is a test.") == "zh"
+    assert core.translate_kind("deploy") == "dictionary"
+    assert core.translate_kind("take over") == "dictionary"
+    assert core.translate_kind("明天要更新路由表") == "en"
+    assert core.translate_kind("我們明天要 deploy Terraform") == "en"  # 中文敘述夾英文術語
+    assert core.translate_kind("Please check the Terraform plan before 明天") == "zh"  # 英文為主
+    assert core.translate_kind("今日は会議があります") == "zh"  # 日文（有假名）翻成中文
+    assert core.translate_kind("안녕하세요") == "zh"
+
+
+def test_translate_prompts_timeout_truncation_and_failure():
+    srv = fake_llm(0, "部署")
+    cfg = cfg_with(llm_url=srv.url, llm_timeout=1, translate_max_chars=20)
+    assert core.translate("deploy", cfg) == ("部署", True, False)
+    assert srv.body["messages"][0]["content"] == core.DEFAULTS["prompts"]["dictionary"]
+    core.translate("明天要更新路由表", cfg)
+    assert srv.body["messages"][0]["content"].startswith(core.DEFAULTS["prompts"]["translate_en"])
+    assert "Terraform" in srv.body["messages"][0]["content"]  # 詞彙表保持原寫法
+    out, ok, truncated = core.translate("This is a long English sentence.", cfg)
+    assert truncated and srv.body["messages"][1]["content"] == "This is a long Engli"
+    assert srv.body["messages"][0]["content"].startswith(core.DEFAULTS["prompts"]["translate_zh"])
+    srv.shutdown()
+    slow = fake_llm(1.5, "太慢")  # llm_timeout 1 秒會逾時，translate_timeout 20 秒不會
+    assert core.translate("hello there friend", cfg_with(llm_url=slow.url, llm_timeout=1))[1] is True
+    slow.shutdown()
+    assert core.translate("hello", cfg_with(llm_url="http://127.0.0.1:1/x")) == ("", False, False)
+
+
+def test_build_messages_english_mode_uses_style():
+    msgs = core.build_messages("嗯我明天會晚點到", "english", cfg_with(), {"bundle": "com.tinyspeck.slackmacgap"})
+    assert msgs[0]["content"].startswith(core.DEFAULTS["prompts"]["english"])
+    assert "口語" in msgs[0]["content"] and msgs[1]["content"] == "嗯我明天會晚點到"
+
+
+def test_clean_audio_trims_silence_and_normalizes():
+    sr = core.SAMPLE_RATE
+    tone = lambda sec, amp: (amp * np.sin(np.arange(int(sec * sr)) * 2 * np.pi * 220 / sr)).astype(np.float32)
+    quiet = lambda sec: (0.0005 * np.random.default_rng(0).standard_normal(int(sec * sr))).astype(np.float32)
+    audio = np.concatenate([quiet(1.5), tone(0.5, 0.05), quiet(3.0), tone(0.5, 0.05), quiet(2.0)])
+    out = core.clean_audio(audio, cfg_with())
+    # 頭尾靜音去掉、中間 3 秒停頓縮成 0.6 秒；兩段聲音各 0.5 秒加前後 0.2 秒
+    assert 1.6 * sr < len(out) < 2.6 * sr
+    assert abs(float(np.max(np.abs(out))) - 0.05 * core.MAX_GAIN) < 0.01  # 很小聲：最多放大 8 倍，不把噪音放太大
+    mid = np.concatenate([quiet(0.5), tone(0.5, 0.2), quiet(0.5)])
+    assert abs(float(np.max(np.abs(core.clean_audio(mid, cfg_with())))) - core.TARGET_PEAK) < 0.01  # 放大到 0.9
+    assert np.array_equal(core.clean_audio(audio, cfg_with(audio_cleanup=False)), audio)
+    loud = tone(1.0, 0.5)
+    assert float(np.max(np.abs(core.clean_audio(loud, cfg_with())))) <= core.TARGET_PEAK + 1e-6
+    silent = quiet(1.0)
+    assert len(core.clean_audio(silent, cfg_with(silence_rms=0.1))) == len(silent)  # 全是靜音就不動
+
+
+def test_load_config_upgrades_untouched_old_default_prompts(tmp_path):
+    p = tmp_path / "c.json"
+    old_clean = ("你是語音輸入的文字清理器。把使用者的口語逐字稿整理成繁體中文（台灣用語）：去除贅字（嗯、呃、那個、就是）、"
+                 "補上標點、修正明顯的辨識錯字。中英混用的技術名詞保留英文原文。不改寫語意、不摘要、不回答問題。只輸出整理後的文字。")
+    p.write_text(json.dumps({"prompts": {"clean": old_clean, "organize": "我自己改的整理 prompt"}}, ensure_ascii=False))
+    cfg = core.load_config(p)
+    assert cfg["prompts"]["clean"] == core.DEFAULTS["prompts"]["clean"]  # 沒改過的舊版預設 → 新版
+    assert cfg["prompts"]["organize"] == "我自己改的整理 prompt"  # 自訂的保留
+    assert "旁白" in cfg["prompts"]["clean"] and json.loads(p.read_text())["prompts"]["clean"] == cfg["prompts"]["clean"]
+
+
 # ---------- 歷史紀錄 ----------
 
 def test_history_stats(tmp_path):
@@ -238,6 +312,37 @@ def test_history_stats(tmp_path):
     h.add(np.zeros(10, np.float32), duration=30, raw="a", text="你好 世界", ok=1)
     h.add(np.zeros(10, np.float32), duration=90, raw="b", text="OK", ok=0)
     assert h.stats() == {"count": 2, "seconds": 120, "chars": 6, "ok": 1}
+
+
+def test_api_history_days_set(tmp_path):
+    from window import Api
+    cfg = cfg_with()
+    soon = []
+    sysm = type("S", (), {"purge_soon": lambda self: soon.append(1)})()
+    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json", system=sysm)
+    assert api.call("settings", [])["result"]["history_days"] == 30
+    assert api.call("history_days_set", ["7"])["result"]["history_days"] == 7 and soon == [1]
+    assert json.loads((tmp_path / "c.json").read_text())["history_days"] == 7
+    for bad in ("0", "5000", "abc"):
+        assert api.call("history_days_set", [bad])["ok"] is False
+    assert cfg["history_days"] == 7
+
+
+def test_app_main_menu_has_minimize_and_close(app):
+    from AppKit import NSApplication
+    app._edit_menu()
+    items = [i for top in NSApplication.sharedApplication().mainMenu().itemArray() for i in top.submenu().itemArray()]
+    keys = {(i.keyEquivalent(), i.action()) for i in items}
+    assert ("m", "performMiniaturize:") in keys and ("w", "performClose:") in keys and ("c", "copy:") in keys
+
+
+def test_api_theme_set(tmp_path):
+    from window import Api
+    cfg = cfg_with()
+    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json")
+    assert api.call("theme_set", ["dark"])["result"] == "dark" and cfg["theme"] == "dark"
+    assert json.loads((tmp_path / "c.json").read_text())["theme"] == "dark"
+    assert api.call("theme_set", ["purple"])["ok"] is False and cfg["theme"] == "dark"
 
 
 def test_api_home_and_hotkey_reset(tmp_path):
@@ -387,6 +492,90 @@ def test_frontmost_context_has_app():
     assert ctx["app"] and set(ctx) >= {"app", "bundle", "title"}
 
 
+def test_translate_panel_states():
+    import hud
+    copied, replaced, retried = [], [], []
+    p = hud.TranslatePanel(copied.append, replaced.append, retried.append)
+    p.show_result("不該出現", False)
+    assert not p.shown  # 還沒開（或已關掉）時，晚到的結果不會讓視窗跳出來
+    p.show_loading("Hello world", None)
+    assert p.shown and p.state == "loading" and not p.panel.isKeyWindow()  # 不搶焦點
+    assert all(b.isHidden() for b in p.buttons.values())
+    p.show_result("你好，世界\n" * 200, True)
+    f = p.panel.frame()
+    assert f.size.height <= hud.TR_MAX_H and f.size.width <= 520 and "太長" in p.head.stringValue()
+    assert not p.buttons["copy"].isHidden() and not p.buttons["replace"].isHidden() and p.buttons["retry"].isHidden()
+    p.body.setSelectedRange_((0, 2))
+    p.do_copy()
+    assert copied == ["你好"]
+    p.body.setSelectedRange_((0, 0))
+    p.do_copy()
+    assert copied[-1] == p.text
+    p.show_error("DGX 未回應")
+    assert not p.buttons["retry"].isHidden() and p.buttons["copy"].isHidden()
+    p.do_retry()
+    assert retried == ["Hello world"]
+    p.show_result("譯文", False)
+    p.do_replace()
+    assert replaced == ["譯文"] and not p.shown and p.monitor is None
+    p.show_notice("請先選取文字", (100, 100, 50, 16), 0.01)
+    assert p.shown and p.panel.frame().size.width < hud.TR_W
+    p.hide()
+
+
+def test_translate_panel_theme_and_drag():
+    import hud
+    theme = {"v": "system"}
+    p = hud.TranslatePanel(lambda t: None, lambda t: None, lambda s: None, theme=lambda: theme["v"])
+    assert p.view.acceptsFirstMouse_(None)  # 不是 key window 也能第一下就拖
+    p.show_loading("Hello world", (300, 300, 100, 16))
+    assert p.panel.appearance() is None  # 跟著 macOS
+    theme["v"] = "light"
+    p.show_result("你好", False, "翻成中文")
+    assert p.panel.appearance().name() == "NSAppearanceNameAqua" and p.head.stringValue() == "翻成中文"
+    theme["v"] = "dark"
+    p.show_error("DGX 未回應")
+    assert p.panel.appearance().name() == "NSAppearanceNameDarkAqua"
+
+    f = p.panel.frame()
+    p.panel.setFrameOrigin_((f.origin.x + 80, f.origin.y - 40))  # 模擬使用者拖移
+    top = p.panel.frame().origin.y + p.panel.frame().size.height
+    p.show_loading("New text", (900, 600, 100, 16))  # 開著時換新的翻譯：留在拖過去的位置
+    f2 = p.panel.frame()
+    assert f2.origin.x == f.origin.x + 80 and f2.origin.y + f2.size.height == top
+    p.hide()
+    p.show_loading("Again", (300, 300, 100, 16))  # 關掉再開：回到選取文字旁
+    assert p.panel.frame().origin.x == f.origin.x
+    p.hide()
+
+
+def test_translate_panel_edges_and_resize():
+    import hud
+    T, L, B, R = hud.TOP, hud.LEFT, hud.BOTTOM, hud.RIGHT
+    assert hud.edge_at(200, 100, 400, 200) == 0  # 中間：拖移
+    assert hud.edge_at(398, 100, 400, 200) == R and hud.edge_at(2, 198, 400, 200) == T | L
+    assert hud.edge_at(399, 1, 400, 200) == B | R
+    assert hud.resized_frame((100, 100, 400, 200), R, 50, 0) == (100, 100, 450, 200)
+    assert hud.resized_frame((100, 100, 400, 200), L, 50, 0) == (150, 100, 350, 200)  # 右緣固定
+    assert hud.resized_frame((100, 100, 400, 200), B, 0, -30) == (100, 70, 400, 230)  # 上緣固定
+    assert hud.resized_frame((100, 100, 400, 200), T | R, 1000, 500) == (100, 100, 1400, 700)  # 可以超過自動上限
+    x, y, w, h = hud.resized_frame((100, 100, 400, 200), L | T, 1000, -1000)
+    assert (w, h) == (hud.TR_MIN_W, hud.TR_MIN_H) and x + w == 500 and y == 100  # 不小於最小尺寸
+
+    p = hud.TranslatePanel(lambda t: None, lambda t: None, lambda s: None)
+    p.show_loading("Hello", (300, 300, 100, 16))
+    p.show_result("你好", False, "翻成中文")
+    f = p.panel.frame()
+    p.panel.setFrame_display_(((f.origin.x, f.origin.y - 200), (700, f.size.height + 200)), True)  # 模擬使用者縮放
+    assert p.scroll.frame().size.width == 700 - 2 * hud.TR_PAD  # 內容跟著視窗變寬
+    p.show_result("更長的翻譯\n" * 3, False, "翻成中文")
+    assert (p.panel.frame().size.width, p.panel.frame().size.height) == (700, f.size.height + 200)  # 維持使用者的尺寸
+    p.hide()
+    p.show_loading("Again", (300, 300, 100, 16))
+    assert p.panel.frame().size.width == hud.TR_W  # 關掉再開回到自動大小
+    p.hide()
+
+
 def test_hud_bars_and_panel():
     import hud
     assert hud.bar_heights([], 4) == [0.06] * 4
@@ -512,6 +701,31 @@ class FakeListener:
         self.stopped = True
 
 
+class FakePanel:
+    """記錄 App 對翻譯浮動視窗的呼叫；shown／source 的變化跟真的 TranslatePanel 一樣。"""
+
+    def __init__(self):
+        self.shown, self.source, self.calls = False, "", []
+
+    def show_loading(self, source, anchor):
+        self.shown, self.source = True, source
+        self.calls.append(("loading", source))
+
+    def show_result(self, text, truncated, label=""):
+        self.label = label
+        self.calls.append(("result", text, truncated))
+
+    def show_error(self, message):
+        self.calls.append(("error", message))
+
+    def show_notice(self, message, anchor, seconds):
+        self.calls.append(("notice", message))
+
+    def hide(self):
+        self.shown = False
+        self.calls.append(("hide",))
+
+
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     import queue
@@ -527,6 +741,8 @@ def app(tmp_path, monkeypatch):
     a.win = type("W", (), {"js": lambda self, code: a.js_calls.append(code), "show": lambda self, tab: None,
                            "visible": lambda self: False})()
     a.listener, a.tap_disabled, a.tap_checked = FakeListener(), False, 0.0
+    a.tpanel, a.tr_seq = FakePanel(), 0
+    a.swallow_up = None
     monkeypatch.setattr(voicetype.rumps, "notification", lambda *x: a.notes.append(x))
     monkeypatch.setattr(voicetype, "save_config", lambda cfg: None)
     monkeypatch.setattr(a, "build_menu", lambda: None, raising=False)
@@ -695,3 +911,196 @@ def test_app_pause_only_when_idle(app):
     app.state = "recording"
     app.toggle_pause(sender)
     assert app.state == "recording" and "無法暫停" in app.flash[0]
+
+
+@pytest.fixture
+def now_main(monkeypatch):
+    """AppHelper.callAfter 改成立即執行（測試裡沒有主執行緒的 run loop）。"""
+    import voicetype
+    monkeypatch.setattr(voicetype.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+
+
+def test_app_translate_hotkey_and_esc(app, now_main, monkeypatch):
+    called = threading.Event()
+    monkeypatch.setattr(app, "translate_selection", called.set)
+    assert app.intercept(*key_event(39, core.MOD_FLAGS["cmd"])) is None
+    assert called.wait(1) and app.state == "idle"  # 翻譯不碰錄音狀態
+    assert app.intercept(*key_event(core.KEY_ESC, 0)) is not None  # 視窗沒開：Esc 照常傳給 App
+    app.tpanel.shown = True
+    assert app.intercept(*key_event(core.KEY_ESC, 0)) is None and app.tpanel.calls == [("hide",)]
+
+
+def test_app_translate_selection_flow(app, now_main, monkeypatch):
+    import voicetype
+    sel = {"text": ""}
+    monkeypatch.setattr(voicetype.macos, "read_selection", lambda allow_copy=True: sel["text"])
+    monkeypatch.setattr(voicetype.macos, "selection_bounds", lambda: (10, 10, 50, 16))
+    monkeypatch.setattr(voicetype, "translate", lambda text, cfg: (f"譯：{text}", True, False))
+    p = app.tpanel
+
+    app.translate_selection()
+    assert p.calls == [("notice", "請先選取文字")]
+    sel["text"] = "  hello  "
+    app.translate_selection()
+    assert p.calls[-2:] == [("loading", "hello"), ("result", "譯：hello", False)] and p.label == "字典"
+    app.translate_selection()  # 選取沒變再按一次：關閉
+    assert p.calls[-1] == ("hide",) and not p.shown
+    app.translate_selection()
+    sel["text"] = "world"
+    app.translate_selection()  # 視窗開著、選了新的文字：換成新的翻譯
+    assert p.calls[-1] == ("result", "譯：world", False) and p.shown
+    sel["text"] = ""
+    app.translate_selection()  # 視窗開著、沒有選取：關閉
+    assert p.calls[-1] == ("hide",)
+
+    monkeypatch.setattr(voicetype, "translate", lambda text, cfg: ("", False, False))
+    app.retry_translate("hello")
+    for _ in range(50):
+        if p.calls[-1][0] == "error":
+            break
+        time.sleep(0.02)
+    assert p.calls[-1][0] == "error"
+    assert app.history.list() == []  # 選取翻譯不存歷史紀錄
+
+
+def test_app_stale_translation_is_dropped(app, now_main, monkeypatch):
+    import voicetype
+    gate = threading.Event()
+
+    def slow(text, cfg):
+        if text == "first":
+            gate.wait(2)
+        return f"譯：{text}", True, False
+    monkeypatch.setattr(voicetype, "translate", slow)
+    t = threading.Thread(target=app.run_translate, args=("first", None))
+    t.start()
+    time.sleep(0.05)
+    app.run_translate("second", None)
+    gate.set()
+    t.join(2)
+    assert [c for c in app.tpanel.calls if c[0] == "result"] == [("result", "譯：second", False)]
+
+
+def test_app_english_mode_pastes_and_saves(app, monkeypatch):
+    import voicetype
+    pasted, seen = [], []
+    monkeypatch.setattr(voicetype.macos, "paste", pasted.append)
+    monkeypatch.setattr(voicetype, "transcribe", lambda audio, cfg: ("我明天會晚點到", []))
+    monkeypatch.setattr(voicetype, "llm_refine",
+                        lambda text, mode, cfg, ctx: seen.append(mode) or ("I'll be late tomorrow.", True))
+    app.start = lambda m: (setattr(app, "state", "recording"), setattr(app, "mode", m))
+    app.intercept(*key_event(47, core.MOD_FLAGS["cmd"] | core.MOD_FLAGS["alt"]))
+    assert app.state == "recording" and app.mode == "english"
+    app.process(0.1 * np.ones(core.SAMPLE_RATE, np.float32), "english", {"app": "Slack"})
+    assert seen == ["english"] and pasted == ["I'll be late tomorrow."]
+    r = app.history.list()[0]
+    assert r["mode"] == "english" and r["raw"] == "我明天會晚點到"
+
+
+@pytest.mark.e2e
+def test_e2e_translate_selection_both_ways():
+    cfg = cfg_with()
+    out, ok, _ = core.translate("Please make sure the backup finishes before the maintenance window.", cfg)
+    print(f"\nen→zh={out}")
+    assert ok and "備份" in out
+    out, ok, _ = core.translate("明天的維護時間改到晚上十點", cfg)
+    print(f"zh→en={out}")
+    assert ok and ("10" in out or "ten" in out.lower()) and not any("一" <= c <= "鿿" for c in out)
+    out, ok, _ = core.translate("deploy", cfg)
+    print(f"dict={out}")
+    assert ok and "部署" in out and "例" in out
+
+
+@pytest.mark.e2e
+def test_e2e_english_mode(tmp_path):
+    audio = tts(tmp_path, "嗯我明天早上會晚一點到辦公室")
+    cfg = cfg_with()
+    raw, _ = core.transcribe(audio, cfg)
+    out, ok = core.llm_refine(raw, "english", cfg, {"bundle": "com.tinyspeck.slackmacgap"})
+    print(f"\nraw={raw}\nout={out}")
+    assert ok and "tomorrow" in out.lower() and not any("一" <= c <= "鿿" for c in out)
+    out, ok = core.llm_refine("會議改到三點，喔不對，四點", "english", cfg)
+    print(f"correction={out}")
+    assert ok and ("4" in out or "four" in out.lower())
+    assert "3" not in out and "three" not in out.lower() and "actually" not in out.lower()
+
+
+def test_app_shift_stop_sends_enter(app, monkeypatch):
+    import voicetype
+    finished, keys = [], []
+    monkeypatch.setattr(app, "finish", lambda mode, send=False: finished.append((mode, send)))
+    cmd, shift = core.MOD_FLAGS["cmd"], core.MOD_FLAGS["shift"]
+    app.state, app.mode = "idle", None
+    assert app.intercept(*key_event(43, cmd | shift)) is not None  # 沒在錄音：⇧⌘, 照常傳給 App
+    app.state, app.mode = "recording", "clean"
+    assert app.intercept(*key_event(47, cmd | shift)) is None and finished == [("organize", True)]
+    assert app.intercept(*key_event(47, cmd | shift, down=False)) is None  # 對應的 keyUp 也吞掉
+    assert app.intercept(*key_event(47, cmd | shift, down=False)) is not None
+
+    app.keys.down("clean", 43, 0.0, False)  # 長按說話，放開時按著 Shift
+    app.state = "recording"
+    app.intercept(*key_event(43, cmd | shift, down=False))
+    assert finished[-1] == ("clean", True)
+
+    monkeypatch.setattr(voicetype.macos, "paste", lambda t: keys.append("paste"))
+    monkeypatch.setattr(voicetype.macos, "press_return", lambda: keys.append("return"))
+    monkeypatch.setattr(voicetype, "transcribe", lambda audio, cfg: ("好", []))
+    monkeypatch.setattr(voicetype, "llm_refine", lambda *a: ("好。", True))
+    audio = 0.1 * np.ones(core.SAMPLE_RATE, np.float32)
+    app.process(audio, "clean", {"send": True})
+    app.process(audio, "clean", {})
+    assert keys == ["paste", "return", "paste"]
+
+
+def test_press_return_has_no_modifiers(monkeypatch):
+    import Quartz
+    import macos
+    sent = []
+    monkeypatch.setattr(Quartz, "CGEventPost", lambda tap, ev: sent.append(
+        (Quartz.CGEventGetIntegerValueField(ev, Quartz.kCGKeyboardEventKeycode), Quartz.CGEventGetFlags(ev))))
+    macos.press_return()
+    assert [k for k, _ in sent] == [36, 36] and not any(f & core.MOD_FLAGS["shift"] for _, f in sent)
+
+
+def test_app_sound_cue_and_skip(app, now_main, monkeypatch):
+    played = []
+    monkeypatch.setattr(app, "play_cue", lambda: played.append(1))
+    app.state = "recording"
+    app._mic_started(Done())
+    assert played == [1]
+    app.cfg["sound_cue"] = False
+    app._mic_started(Done())
+    assert played == [1]
+
+    app.rec.audio = np.ones(core.SAMPLE_RATE, np.float32)
+    app.ctx_thread = threading.Thread()
+    app.ctx_thread.start()
+    app.cfg["sound_cue"] = True
+    app._finish("clean")
+    audio, _, ctx = app.jobs.get_nowait()
+    assert len(audio) == core.SAMPLE_RATE - int(0.25 * core.SAMPLE_RATE) and ctx["send"] is False
+
+
+@pytest.mark.e2e
+def test_e2e_intent_prompts():
+    cfg = cfg_with()
+    out, ok = core.llm_refine("幫我寫正式一點，明天下午兩點開會討論 DNS 切換", "clean", cfg)
+    print(f"\nside note={out}")
+    assert ok and "正式一點" not in out and "兩點" in out
+    out, ok = core.llm_refine("那個管 DNS 的服務要續約", "clean", cfg)  # 詞彙表有 Cloudflare、Gandi，對不上就不要猜
+    print(f"name={out}")
+    assert ok and "Cloudflare" not in out and "Gandi" not in out and "DNS" in out
+    out, ok = core.llm_refine("那個 CDN 的設定明天改，然後會議改在下午三點，對了剛剛說的 CDN 改成後天", "organize", cfg)
+    print(f"late correction={out}")
+    assert ok and "後天" in out and "明天" not in out
+
+
+@pytest.mark.e2e
+def test_e2e_clean_audio_keeps_recognition(tmp_path):
+    speech = tts(tmp_path, "我們明天要更新路由表")
+    gap = np.zeros(core.SAMPLE_RATE * 4, np.float32)
+    audio = np.concatenate([gap, speech, gap, speech * 0.1, gap])
+    cleaned = core.clean_audio(audio, cfg_with())
+    raw, _ = core.transcribe(cleaned, cfg_with())
+    print(f"\nraw={raw} {len(audio) / core.SAMPLE_RATE:.1f}s → {len(cleaned) / core.SAMPLE_RATE:.1f}s")
+    assert len(cleaned) < len(audio) / 2 and raw.count("路由表") == 2

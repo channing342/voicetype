@@ -24,7 +24,7 @@ class Api:
     METHODS = {"list", "get", "audio", "delete", "reprocess", "copy", "vocab", "vocab_add", "vocab_remove",
                "repl_set", "repl_remove", "vocab_suggest", "settings", "asr", "asr_set", "home", "hotkey_capture",
                "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart",
-               "llm", "llm_set", "llm_test"}
+               "llm", "llm_set", "llm_test", "theme_set", "history_days_set"}
 
     def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None,
                  system=None):
@@ -109,6 +109,16 @@ class Api:
         cfg = self.get_cfg()
         return {"history_days": cfg["history_days"]}
 
+    def history_days_set(self, days):
+        days = int(float(days))
+        if not 1 <= days <= 3650:
+            raise ValueError("保留天數要在 1 到 3650 之間")
+        self.get_cfg()["history_days"] = days
+        self._save()
+        if self.system:
+            self.system.purge_soon()
+        return self.settings()
+
     def asr(self):
         current = self.get_cfg()["asr_model"]
         choices = [{**c, "downloaded": hf_cached(c["id"])} for c in ASR_CHOICES]
@@ -164,7 +174,15 @@ class Api:
                 "styles": [{"name": r["name"], "style": r["style"]} for r in cfg["app_styles"]],
                 "stats": {**st, "cpm": round(cpm), "saved": max(0, st["chars"] / TYPING_CPM * 60 - st["seconds"]),
                           "ok_rate": round(st["ok"] / st["count"] * 100) if st["count"] else None},
-                "asr": {"name": cur, **self.asr_status()}, "history_days": cfg["history_days"], **self.system.status()}
+                "asr": {"name": cur, **self.asr_status()}, "history_days": cfg["history_days"], "theme": cfg["theme"],
+                **self.system.status()}
+
+    def theme_set(self, theme):
+        if theme not in ("system", "light", "dark"):
+            raise ValueError(f"未知的主題 {theme}")
+        self.get_cfg()["theme"] = theme
+        self._save()
+        return theme
 
     def hotkey_capture(self, mode):
         self.system.capture(mode)
@@ -252,6 +270,8 @@ class MainWindow:
         if self.window is None:
             self._build(tab)
         else:
+            if self.window.isMiniaturized():  # ⌘M 縮到 Dock 後，再按 ⌥⌘, 要叫回來
+                self.window.deminiaturize_(None)
             self.js(f"showTab('{tab}')")
         self.window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)

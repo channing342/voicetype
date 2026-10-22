@@ -27,6 +27,8 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 - **主執行緒**（rumps `Timer` → `tick`）：所有 UI 更新（選單列 title、`Hud`）只在這裡。活動中 30fps、閒置 0.5 秒，切換頻率時重建 Timer。
 - **單一 worker 執行緒**（`App.worker` + `self.jobs`）：MLX GPU stream 綁執行緒，**所有 `transcribe` 都必須在這條**，含啟動預熱（`mode=None` 的 job）。
 - `Recorder.start/stop` 立即回傳 Future，實際工作在 Recorder 自己的單一執行緒依呼叫順序執行。不要改回「各開一條執行緒 + 鎖」：鎖不保證先後，Esc 太快時麥克風會關不掉。
+- 選取翻譯（⌘'）不走錄音狀態機：intercept 開短命執行緒跑 `App.translate_selection`（讀選取可能要 ⌘C）→ `core.translate` → 用 `AppHelper.callAfter` 更新 `hud.TranslatePanel`。`tr_seq` 丟掉過時的結果；`TranslatePanel.shown` 為 True 時 intercept 才攔截 Esc。浮動視窗是 nonactivating panel，按「取代選取」時 ⌘V 會回到原本的 App。
+- AX：macOS 27 的 system-wide `AXFocusedUIElement` 常回 -25204，`macos.focused_element` 會改問最前面的 App；不要拿掉這個退路，否則讀選取永遠落到 ⌘C。
 - `_finish` 會 `join` 讀情境的執行緒，避免短錄音拿不到選取文字。開始錄音時只用 AX 讀選取文字；結束時的模式是編輯且 AX 讀不到，才在 `_finish` 用 ⌘C 退路。
 - `window.Api` 的 `system` 就是 App（`status`、`capture`、`config_changed`、`request_permissions`、`open_privacy`、`restart`）；Api 在背景執行緒呼叫，碰選單或系統對話框的都要 `AppHelper.callAfter`。快捷鍵錄製：首頁呼叫 `capture` 設 `capturing`，下一個按鍵由 `intercept` 攔下，`save_capture` 存檔後呼叫頁面的 `captureDone()`。
 - WKWebView 的 bridge 回呼在主執行緒，`Bridge` 把 `Api.call` 丟背景執行緒（DGX 可能數秒），完成後用 `AppHelper.callAfter` 回主執行緒 `evaluateJavaScript`。
@@ -38,6 +40,10 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=false`）。`llm_refine` 回傳 `(文字, 是否成功)`，失敗退回原文；編輯模式失敗時不貼上。替換規則在 LLM 之後套用。
 
 設定：`DEFAULTS` 與 `config.json` 一層淺合併，`load_config` 會把新欄位寫回舊設定檔。新增設定只需加在 `DEFAULTS`。
+
+**改 `DEFAULTS["prompts"]` 時**：先把改之前每個 prompt 的 sha1 前 12 碼加進 `core.OLD_PROMPTS`。設定檔存的是完整 prompt，會蓋過預設；`load_config` 只會把 hash 在 `OLD_PROMPTS` 裡（使用者沒改過的舊版預設）的換成新版。漏加的話新 prompt 到不了使用者手上（第二版的自我修正就這樣漏了一陣子）。
+
+翻譯浮動視窗 `TranslatePanel._render`：先設定視窗大小，再擺子元件；反過來 autoresizing 會把元件再位移一次。拖移與邊緣縮放都在 `Background.mouseDown_`（邊緣 6px 縮放、其他地方 `performWindowDragWithEvent_`），不要改回 `movableByWindowBackground`，否則邊緣收不到滑鼠事件。
 
 ## PyObjC 陷阱
 
