@@ -11,16 +11,26 @@ import pytest
 import core
 from history import History
 
-DGX = core.DEFAULTS["llm_url"]
 
 
-def cfg_with(**kw):
-    return {**json.loads(json.dumps(core.DEFAULTS)), **kw}
+
+def cfg_with(llm_url=None, llm_timeout=None, **kw):
+    """llm_url／llm_timeout 改的是使用中那組 LLM 設定（cfg["llm"]）。"""
+    cfg = {**json.loads(json.dumps(core.DEFAULTS)), **kw}
+    cfg["llm"] = {**core.DEFAULT_LLM, "url": llm_url or core.DEFAULT_LLM["url"],
+                  "timeout": llm_timeout or core.DEFAULT_LLM["timeout"], "headers": {}}
+    return cfg
+
+
+def llm_store(tmp_path):
+    from llmstore import LLMStore
+    return LLMStore(tmp_path / "h.db", tmp_path / "secret.key")
 
 
 def fake_llm(delay, reply):
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
+            self.server.headers = self.headers
             self.server.body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             time.sleep(delay)
             self.send_response(200)
@@ -41,10 +51,10 @@ def fake_llm(delay, reply):
 def test_load_config_creates_defaults_and_merges(tmp_path):
     p = tmp_path / "c.json"
     cfg = core.load_config(p)
-    assert p.exists() and cfg["llm_timeout"] == 10 and cfg["history_days"] == 30
-    p.write_text(json.dumps({"llm_timeout": 20, "prompts": {"clean": "X"}}))
+    assert p.exists() and cfg["history_days"] == 30
+    p.write_text(json.dumps({"history_days": 7, "prompts": {"clean": "X"}}))
     cfg = core.load_config(p)
-    assert cfg["llm_timeout"] == 20
+    assert cfg["history_days"] == 7
     assert cfg["prompts"]["clean"] == "X" and "edit" in cfg["prompts"]
     assert "hotkeys" in json.loads(p.read_text())  # 舊設定檔會補上新欄位
 
@@ -382,22 +392,94 @@ def test_api_home_and_hotkey_reset(tmp_path):
     assert sysm.changed == 2 and json.loads((tmp_path / "c.json").read_text())["hotkeys"]["clean"]["keycode"] == 43
 
 
-def test_api_llm_settings_validate_save_and_test(tmp_path):
+def test_llmstore_encrypts_headers_and_keeps_key_separate(tmp_path):
+    import os
+    import stat
+    st = llm_store(tmp_path)
+    assert [p["id"] for p in st.list()] == ["dgx"] and st.active()["name"] == "DGX"  # 空資料庫放一組預設
+    assert stat.S_IMODE(os.stat(tmp_path / "secret.key").st_mode) == 0o600
+    pid = st.save({"name": "GW", "url": "http://gw/v1", "model": "m", "timeout": 2.5, "headers": {"x-bf-vk": "sk-secret"}})
+    assert st.get(pid) == {"id": pid, "name": "GW", "url": "http://gw/v1", "model": "m", "timeout": 2.5,
+                           "headers": {"x-bf-vk": "sk-secret"}}
+    assert b"sk-secret" not in (tmp_path / "h.db").read_bytes()  # 資料庫裡是密文
+    assert [p["id"] for p in st.list()] == ["dgx", pid]
+    st.save({**st.get(pid), "timeout": 30})
+    assert st.get(pid)["timeout"] == 30 and [p["id"] for p in st.list()] == ["dgx", pid]  # 更新不改順序
+    assert llm_store(tmp_path).get(pid)["headers"] == {"x-bf-vk": "sk-secret"}  # 重開用同一把金鑰
+
+    (tmp_path / "secret.key").unlink()  # 金鑰遺失：舊值解不開，當成沒有 header
+    assert llm_store(tmp_path).get(pid)["headers"] == {}
+
+    st.use(pid)
+    assert st.active()["id"] == pid
+    st.delete(pid)
+    assert st.active()["id"] == "dgx" and st.get(pid) is None  # 使用中那組不見了就用第一組
+
+
+def test_llmstore_imports_legacy_config(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"llm_url": "http://gw/v1", "llm_model": "m", "llm_timeout": 20,
+                             "llm_headers": {"x-bf-vk": "sk-old"}, "history_days": 7}))
+    cfg = core.load_config(p)
+    st = llm_store(tmp_path)
+    assert st.import_legacy(cfg) and not st.import_legacy(cfg)
+    core.save_config({**cfg, "llm": st.active()}, p)
+    assert st.active() == {"id": "dgx", "name": "DGX", "url": "http://gw/v1", "model": "m", "timeout": 20,
+                           "headers": {"x-bf-vk": "sk-old"}}
+    text = p.read_text()
+    assert "sk-old" not in text and "llm" not in text and json.loads(text)["history_days"] == 7  # cfg["llm"] 不寫進設定檔
+
+    st2 = llm_store(tmp_path / "b")  # 鑰匙圈版：多組設定搬過來，header 值不在設定檔裡
+    old = {"llm_profiles": [{"id": "dgx", "name": "DGX", "url": "http://a", "model": "a", "timeout": 10, "headers": ["k"]},
+                            {"id": "x1", "name": "GW", "url": "http://b", "model": "b", "timeout": 5, "headers": []}],
+           "llm_profile": "x1"}
+    assert st2.import_legacy(old) and old == {}
+    assert [p["name"] for p in st2.list()] == ["DGX", "GW"] and st2.active()["id"] == "x1"
+    assert st2.get("dgx")["url"] == "http://a" and st2.get("dgx")["headers"] == {}
+
+
+def test_api_llm_profiles_save_use_delete(tmp_path):
     from window import Api
-    cfg, changed = cfg_with(), []
+    st, changed = llm_store(tmp_path), []
+    st.save({**core.DEFAULT_LLM, "url": "http://127.0.0.1:1/x"})
+    cfg = {**cfg_with(), "llm": st.active()}
     sysm = type("S", (), {"config_changed": lambda self: changed.append(1)})()
-    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json", system=sysm)
-    assert api.call("llm", [])["result"] == {"llm_url": DGX, "llm_model": "Qwen3.8-Flash-Next", "llm_timeout": 10}
-    for bad in (["ftp://x", "m", 10], ["http://x", " ", 10], ["http://x", "m", 0]):
-        assert not api.call("llm_set", bad)["ok"]
-    assert cfg["llm_url"] == DGX and changed == []  # 驗證失敗不寫入
+    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json", system=sysm, llm_store=st)
+    r = api.call("llm", [])["result"]
+    assert r["active"] == "dgx" and r["profiles"][0]["name"] == "DGX" and r["profiles"][0]["headers"] == {}
     srv = fake_llm(0, "OK")
-    r = api.call("llm_test", [srv.url, "test-model", "5"])["result"]
-    assert r["reply"] == "OK" and srv.body["model"] == "test-model" and cfg["llm_model"] == "Qwen3.8-Flash-Next"  # 測試不儲存
-    assert api.call("llm_set", [f" {srv.url} ", "test-model", "15"])["ok"]
-    saved = json.loads((tmp_path / "c.json").read_text())
-    assert (saved["llm_url"], saved["llm_model"], saved["llm_timeout"]) == (srv.url, "test-model", 15) and changed == [1]
-    assert not api.call("llm_test", ["http://127.0.0.1:9/v1", "m", 1])["ok"]
+    form = {"id": None, "name": "Bifrost", "url": f" {srv.url} ", "model": "m", "timeout": "15",
+            "headers": [[" x-bf-vk ", " sk-test "], ["", ""], ["CF-Connecting-IP", "10.0.0.1"]]}
+    for bad in ({"name": " "}, {"name": "DGX"}, {"url": "ftp://x"}, {"model": " "}, {"timeout": 0},
+                {"headers": [["bad name", "v"]]}, {"headers": [["", "v"]]}, {"headers": [["X-A", "1"], ["x-a", "2"]]},
+                {"headers": [["X-A", "a\r\nX-B: b"]]}, {"id": "nope"}):
+        assert not api.call("llm_save", [{**form, **bad}])["ok"]
+    assert len(st.list()) == 1 and changed == []  # 驗證失敗不寫入
+
+    assert api.call("llm_test", [form])["result"]["reply"] == "OK" and len(st.list()) == 1  # 測試不儲存
+    assert srv.headers["x-bf-vk"] == "sk-test" and srv.headers["CF-Connecting-IP"] == "10.0.0.1"
+    assert api.call("llm_test", [{**form, "name": ""}])["ok"]  # 測試不要求名稱
+
+    r = api.call("llm_save", [form])["result"]
+    pid = r["saved"]
+    assert r["active"] == "dgx" and changed == [1] and not (tmp_path / "c.json").exists()  # 不碰設定檔
+    assert st.get(pid) == {"id": pid, "name": "Bifrost", "url": srv.url, "model": "m", "timeout": 15,
+                           "headers": {"x-bf-vk": "sk-test", "CF-Connecting-IP": "10.0.0.1"}}
+
+    assert core.llm_refine("原文", "clean", cfg)[1] is False  # 還沒切換，仍用第一組（連不上）
+    assert api.call("llm_use", [pid])["result"]["active"] == pid and cfg["llm"]["id"] == pid
+    srv.headers = None
+    core.llm_refine("原文", "clean", cfg)  # 實際整理的請求帶上 header
+    assert srv.headers["x-bf-vk"] == "sk-test" and srv.headers["Content-Type"] == "application/json"
+
+    assert api.call("llm_save", [{**form, "id": pid, "headers": [["x-bf-vk", "sk-new"]]}])["ok"]
+    assert cfg["llm"]["headers"] == {"x-bf-vk": "sk-new"} and len(st.list()) == 2  # 改使用中那組，cfg["llm"] 跟著變
+
+    assert not api.call("llm_delete", [pid])["ok"]  # 使用中不能刪
+    api.call("llm_use", ["dgx"])
+    assert api.call("llm_delete", [pid])["ok"] and len(st.list()) == 1
+    assert not api.call("llm_use", [pid])["ok"]
+    assert not api.call("llm_test", [{**form, "url": "http://127.0.0.1:9/v1", "timeout": 1, "headers": []}])["ok"]
 
 
 def test_history_add_list_search_update_delete_purge(tmp_path):
@@ -433,7 +515,7 @@ def test_api_vocab_reprocess_and_method_allowlist(tmp_path):
     assert api.call("_save", [])["ok"] is False
 
     srv = fake_llm(0, "歐提 帳號整理後")
-    cfg["llm_url"] = srv.url
+    cfg["llm"]["url"] = srv.url
     rid = h.add(np.zeros(8000, np.float32), mode="clean", raw="歐提帳號", text="舊", ok=0)
     r = api.call("reprocess", [rid, "organize"])["result"]
     assert r["text"] == "OT 帳號整理後" and r["mode"] == "organize" and r["ok"] is True
@@ -1104,3 +1186,23 @@ def test_e2e_clean_audio_keeps_recognition(tmp_path):
     raw, _ = core.transcribe(cleaned, cfg_with())
     print(f"\nraw={raw} {len(audio) / core.SAMPLE_RATE:.1f}s → {len(cleaned) / core.SAMPLE_RATE:.1f}s")
     assert len(cleaned) < len(audio) / 2 and raw.count("路由表") == 2
+
+
+def test_menu_llm_switch_and_timeout_change_active_profile(app, tmp_path):
+    app.llm_store = llm_store(tmp_path)
+    gw = app.llm_store.save({**core.DEFAULT_LLM, "id": None, "name": "GW"})
+    app.use_llm(gw)
+    assert app.cfg["llm"]["name"] == "GW"
+    app.set_llm_timeout(30)
+    assert [p["timeout"] for p in app.llm_store.list()] == [10, 30] and app.cfg["llm"]["timeout"] == 30
+
+
+def test_app_load_cfg_imports_legacy_llm_and_attaches_active(app, tmp_path, monkeypatch):
+    import voicetype
+    app.llm_store, saved = llm_store(tmp_path), []
+    monkeypatch.setattr(voicetype, "load_config", lambda: cfg_with(llm_model="old-model"))
+    monkeypatch.setattr(voicetype, "save_config", lambda cfg: saved.append(dict(cfg)))
+    cfg = app.load_cfg()
+    assert cfg["llm"]["model"] == "old-model" and "llm_model" not in saved[0]
+    monkeypatch.setattr(voicetype, "load_config", lambda: cfg_with())
+    assert app.load_cfg()["llm"]["model"] == "old-model" and len(saved) == 1  # 沒有舊欄位就不存檔

@@ -29,6 +29,11 @@ INTENT = ("說話者對你下的指示或順口補充的旁白（例如「這段
 # 就換成新版，否則改了預設也到不了使用者手上。改 DEFAULTS 的 prompt 時，把改之前的 hash 加進來。
 OLD_PROMPTS = {"09d1a581ffad", "133e96b227a7", "3aa4912d09fa", "3aab445029a2", "cea31b1a5f32", "d30f32b5e38a", "d3e7260901f0", "e34655fbf72b", "e66ae5fb9b79"}
 
+# LLM 設定不在 config.json：多組設定存在 SQLite（llmstore.LLMStore），使用中那組在執行期放進 cfg["llm"]
+DEFAULT_LLM = {"id": "dgx", "name": "DGX", "url": "http://dgx.ansible.news:8888/v1/chat/completions",
+               "model": "Qwen3.8-Flash-Next", "timeout": 10, "headers": {}}
+RUNTIME_KEYS = ("llm",)  # 只在記憶體、不寫進設定檔的欄位
+
 DEFAULTS = {
     "hotkeys": {
         "clean": {"keycode": 43, "mods": ["cmd"], "label": "⌘,"},
@@ -39,9 +44,6 @@ DEFAULTS = {
         "window": {"keycode": 43, "mods": ["alt", "cmd"], "label": "⌥⌘,"},  # 打開歷史紀錄／詞彙視窗，不是錄音模式
     },
     "hold_threshold": 0.4,
-    "llm_url": "http://dgx.ansible.news:8888/v1/chat/completions",
-    "llm_model": "Qwen3.8-Flash-Next",
-    "llm_timeout": 10,
     "translate_timeout": 20,  # 選取翻譯可能是長文，逾時另外設
     "translate_max_chars": 4000,
     "temperature": 0.1,
@@ -125,7 +127,7 @@ def load_config(path=CONFIG_PATH):
 
 def save_config(cfg, path=CONFIG_PATH):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+    path.write_text(json.dumps({k: v for k, v in cfg.items() if k not in RUNTIME_KEYS}, ensure_ascii=False, indent=2))
 
 
 def event_mods(flags):
@@ -312,11 +314,14 @@ def build_messages(text, mode, cfg, ctx=None):
     return [{"role": "system", "content": "\n\n".join(system)}, {"role": "user", "content": user}]
 
 
-def chat(messages, cfg, timeout=None):
-    body = {"model": cfg["llm_model"], "temperature": cfg["temperature"],
+def chat(messages, cfg, timeout=None, profile=None):
+    """profile 預設用使用中那組（cfg["llm"]）；測試連線會直接傳表單上還沒儲存的值。"""
+    profile = profile or cfg["llm"]
+    body = {"model": profile["model"], "temperature": cfg["temperature"],
             "chat_template_kwargs": {"enable_thinking": False}, "messages": messages}
-    req = urllib.request.Request(cfg["llm_url"], json.dumps(body).encode(), {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout or cfg["llm_timeout"]) as r:
+    hdrs = {"Content-Type": "application/json", **profile["headers"]}
+    req = urllib.request.Request(profile["url"], json.dumps(body).encode(), hdrs)
+    with urllib.request.urlopen(req, timeout=timeout or profile["timeout"]) as r:
         return json.load(r)["choices"][0]["message"]["content"].strip()
 
 
@@ -378,7 +383,7 @@ def suggest_vocabulary(texts, cfg):
               "只輸出 JSON 字串陣列，例如 [\"Terraform\", \"OT\"]，最多 30 個。\n\n已收錄：" +
               "、".join(cfg["vocabulary"]))
     out = chat([{"role": "system", "content": prompt}, {"role": "user", "content": "\n---\n".join(texts)}],
-               cfg, timeout=max(cfg["llm_timeout"], 60))
+               cfg, timeout=max(cfg["llm"]["timeout"], 60))
     m = re.search(r"\[.*\]", out, re.S)
     words = json.loads(m.group(0)) if m else []
     have = {v.lower() for v in cfg["vocabulary"]}

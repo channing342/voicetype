@@ -52,7 +52,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { color: var(--danger); }
 button.armed { background: var(--danger); border-color: var(--danger); color: #fff; }
 button:disabled { opacity: .5; cursor: default; }
-input[type=text], input[type=search], select {
+input[type=text], input[type=search], input[type=password], select {
   border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 10px; outline: none;
 }
 input:focus { border-color: var(--accent); }
@@ -237,6 +237,19 @@ main.on { display: flex; }
 .rtable td { padding: 6px 4px; border-bottom: 1px solid var(--line); }
 .rtable td.arrow { color: var(--faint); width: 30px; text-align: center; }
 .rtable td.op { width: 40px; text-align: right; }
+.llm-wrap { display: flex; gap: 20px; align-items: flex-start; }
+.llm-edit { flex: 1; min-width: 0; }
+.llm-list { width: 220px; flex: none; display: flex; flex-direction: column; gap: 6px; border-left: 1px solid var(--line); padding-left: 16px; }
+.prof { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+.prof:hover { background: var(--panel-2); }
+.prof.on { border-color: var(--accent); background: var(--accent-soft); }
+.prof .name { font-weight: 600; font-size: 13px; }
+.prof .name .tag { color: var(--ok); }
+.prof .sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-h { font-size: 13px; margin: 4px 0 4px; }
+.hdrs { max-width: 560px; margin-bottom: 8px; }
+.hdrs td:first-child { width: 36%; }
+.hdrs input { width: 100%; box-sizing: border-box; }
 .suggest label { display: inline-flex; align-items: center; gap: 6px; margin: 0 14px 8px 0; }
 .status { color: var(--muted); font-size: 13px; }
 </style>
@@ -305,13 +318,30 @@ main.on { display: flex; }
 <main id="settings">
   <div class="card">
     <h2>LLM 整理</h2>
-    <p class="hint">辨識完的文字交給這個 OpenAI 相容的 chat completions API 整理；逾時或連不上時改貼辨識原文。</p>
-    <div class="form">
-      <label>API 網址<input id="llmUrl" type="text" placeholder="http://host:8888/v1/chat/completions"></label>
-      <label>模型<input id="llmModel" type="text" placeholder="Qwen3.8-Flash-Next"></label>
-      <label>逾時（秒）<input id="llmTimeout" type="number" min="1" max="120" step="1"></label>
+    <p class="hint">辨識完的文字交給 OpenAI 相容的 chat completions API 整理；逾時或連不上時改貼辨識原文。可以存多組設定，從右邊選一組編輯或設為使用中。</p>
+    <div class="llm-wrap">
+      <div class="llm-edit">
+        <div class="form">
+          <label>名稱<input id="llmName" type="text" placeholder="例如 DGX、LiteLLM"></label>
+          <label>API 網址<input id="llmUrl" type="text" placeholder="http://host:8888/v1/chat/completions"></label>
+          <label>模型<input id="llmModel" type="text" placeholder="Qwen3.8-Flash-Next"></label>
+          <label>逾時（秒）<input id="llmTimeout" type="number" min="1" max="120" step="1"></label>
+        </div>
+        <h3 class="sub-h">自訂 Header</h3>
+        <p class="hint">每次請求都會帶上，例如 LiteLLM 的「Authorization」、Bifrost 的「x-bf-vk」。值加密後存在本機資料庫，不寫進設定檔；畫面上預設遮住。</p>
+        <table class="rtable hdrs" id="llmHeaders"></table>
+        <div class="row"><button id="llmHeaderAdd">新增 Header</button></div>
+        <div class="row">
+          <button class="primary" id="llmSave">儲存</button><button id="llmTest">測試連線</button>
+          <button id="llmUse">設為使用中</button><button class="danger" id="llmDel">刪除</button>
+          <span class="status" id="llmStatus"></span>
+        </div>
+      </div>
+      <aside class="llm-list">
+        <div id="llmProfiles"></div>
+        <button id="llmNew">新增設定</button>
+      </aside>
     </div>
-    <div class="row"><button class="primary" id="llmSave">儲存</button><button id="llmTest">測試連線</button><span class="status" id="llmStatus"></span></div>
   </div>
   <div class="card">
     <h2>歷史紀錄</h2>
@@ -569,19 +599,69 @@ $("#historySave").onclick = async () => {
 
 /* ---------- 設定：LLM ---------- */
 const errText = (e) => e.message.replace(/^\w+Error\(['"]|['"]\)$/g, "");
-const llmForm = () => [$("#llmUrl").value, $("#llmModel").value, $("#llmTimeout").value];
-async function loadLlm() {
-  const l = await call("llm");
-  $("#llmUrl").value = l.llm_url; $("#llmModel").value = l.llm_model; $("#llmTimeout").value = l.llm_timeout;
+const llmHeaders = () => [...document.querySelectorAll("#llmHeaders tr")].map((tr) => [...tr.querySelectorAll("input")].map((i) => i.value));
+let llmState = { profiles: [], active: null }, llmSel = null;  // llmSel 為 null 表示正在新增、還沒儲存
+const llmForm = () => ({ id: llmSel, name: $("#llmName").value, url: $("#llmUrl").value, model: $("#llmModel").value,
+                         timeout: $("#llmTimeout").value, headers: llmHeaders() });
+const llmHost = (u) => { try { return new URL(u).host; } catch { return u; } };
+const llmMsg = (html) => { $("#llmStatus").innerHTML = html; };
+function addHeaderRow(name = "", value = "") {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td><input type="text" placeholder="名稱，例如 x-bf-vk" spellcheck="false"></td>
+    <td><input type="password" placeholder="值" spellcheck="false" autocomplete="off"></td><td class="op"><button title="移除">✕</button></td>`;
+  const [n, v] = tr.querySelectorAll("input");
+  n.value = name; v.value = value;
+  v.onfocus = () => { v.type = "text"; };  // 編輯時顯示明碼，離開後再遮住
+  v.onblur = () => { v.type = "password"; };
+  tr.querySelector("button").onclick = () => tr.remove();
+  $("#llmHeaders").append(tr);
+  return n;
 }
+$("#llmHeaderAdd").onclick = () => addHeaderRow().focus();
+function renderLlmList() {
+  const item = (p) => `<div class="prof${p.id === llmSel ? " on" : ""}" data-id="${esc(p.id)}">
+    <div class="name">${esc(p.name)}${p.id === llmState.active ? '<span class="tag">使用中</span>' : ""}</div>
+    <div class="sub">${esc(p.model)} · ${esc(llmHost(p.url))}</div></div>`;
+  $("#llmProfiles").innerHTML = llmState.profiles.map(item).join("") +
+    (llmSel === null ? '<div class="prof on"><div class="name">新設定</div><div class="sub">尚未儲存</div></div>' : "");
+  document.querySelectorAll("#llmProfiles .prof[data-id]").forEach((el) => { el.onclick = () => selectLlm(el.dataset.id); });
+}
+function selectLlm(id) {
+  const p = llmState.profiles.find((x) => x.id === id);
+  llmSel = p ? p.id : null;
+  const v = p || { name: "", url: "", model: "", timeout: 10, headers: {} };
+  $("#llmName").value = v.name; $("#llmUrl").value = v.url; $("#llmModel").value = v.model; $("#llmTimeout").value = v.timeout;
+  $("#llmHeaders").innerHTML = "";
+  Object.entries(v.headers).forEach(([k, val]) => addHeaderRow(k, val));
+  $("#llmUse").hidden = $("#llmDel").hidden = !p || p.id === llmState.active;
+  $("#llmDel").classList.remove("armed"); $("#llmDel").textContent = "刪除";
+  llmMsg("");
+  renderLlmList();
+}
+async function loadLlm(sel) {
+  llmState = await call("llm");
+  const keep = llmState.profiles.some((p) => p.id === llmSel) ? llmSel : llmState.active;
+  selectLlm(sel === undefined ? keep : sel);
+}
+$("#llmNew").onclick = () => { selectLlm(null); $("#llmName").focus(); };
 $("#llmSave").onclick = async () => {
-  try { await call("llm_set", ...llmForm()); $("#llmStatus").innerHTML = '<span class="ok-text">已儲存</span>'; }
-  catch (e) { $("#llmStatus").innerHTML = `<span class="badge-warn">${esc(errText(e))}</span>`; }
+  try { const r = await call("llm_save", llmForm()); await loadLlm(r.saved); llmMsg('<span class="ok-text">已儲存</span>'); }
+  catch (e) { llmMsg(`<span class="badge-warn">${esc(errText(e))}</span>`); }
+};
+$("#llmUse").onclick = async () => {
+  try { await call("llm_use", llmSel); await loadLlm(llmSel); llmMsg('<span class="ok-text">已切換，之後的整理都用這組</span>'); }
+  catch (e) { llmMsg(`<span class="badge-warn">${esc(errText(e))}</span>`); }
+};
+$("#llmDel").onclick = async () => {
+  const b = $("#llmDel");
+  if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "確認刪除"; setTimeout(() => { b.classList.remove("armed"); b.textContent = "刪除"; }, 3000); return; }
+  try { await call("llm_delete", llmSel); await loadLlm(llmState.active); llmMsg('<span class="ok-text">已刪除</span>'); }
+  catch (e) { llmMsg(`<span class="badge-warn">${esc(errText(e))}</span>`); }
 };
 $("#llmTest").onclick = async () => {
-  const b = $("#llmTest"); b.disabled = true; $("#llmStatus").textContent = "測試中…";
-  try { const r = await call("llm_test", ...llmForm()); $("#llmStatus").innerHTML = `<span class="ok-text">連線成功，${r.ms} ms</span>：${esc(r.reply)}`; }
-  catch (e) { $("#llmStatus").innerHTML = `<span class="badge-warn">連線失敗：${esc(errText(e))}</span>`; }
+  const b = $("#llmTest"); b.disabled = true; llmMsg("測試中…");
+  try { const r = await call("llm_test", llmForm()); llmMsg(`<span class="ok-text">連線成功，${r.ms} ms</span>：${esc(r.reply)}`); }
+  catch (e) { llmMsg(`<span class="badge-warn">連線失敗：${esc(errText(e))}</span>`); }
   b.disabled = false;
 };
 function pollAsr() {

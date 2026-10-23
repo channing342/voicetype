@@ -12,7 +12,7 @@ uv run python voicetype.py                   # 前景啟動，印出「就緒」
 uv run pytest -q -m "not e2e"                # 不需外部資源
 uv run pytest -q                             # 含 E2E：本機辨識模型 + 真實 DGX + 麥克風
 uv run pytest -q test_voicetype.py::test_keylogic_hold_to_talk   # 單一測試
-uv run pytest --cov=core --cov=history --cov=window --cov=hud --cov=macos --cov=voicetype --cov-report=term-missing
+uv run pytest --cov=core --cov=history --cov=llmstore --cov=window --cov=hud --cov=macos --cov=voicetype --cov-report=term-missing
 tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 ```
 
@@ -37,7 +37,7 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 
 辨識引擎：`core.transcribe` 依 `asr_model` 分流。repo 名稱含 whisper 的走 `mlx_whisper`，其他走 `mlx_audio.stt`（Qwen3-ASR 等）。`load_asr` 同一時間只保留一個模型；切換時必須清掉 `mlx_whisper.transcribe.ModelHolder`，否則兩個模型會同時佔記憶體。輸出一律經過 OpenCC `s2tw`（不要用 `s2twp`）。切換由 `Api.asr_set` → `App.switch_asr` 在 worker 排預熱工作，狀態存在 `App.asr_state`。
 
-DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=false`）。`llm_refine` 回傳 `(文字, 是否成功)`，失敗退回原文；編輯模式失敗時不貼上。替換規則在 LLM 之後套用。
+DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=false`）。LLM 設定不在 `config.json`：多組設定存在 `history.db`（`llmstore.LLMStore`，header 以 Fernet 加密，金鑰在 `~/.config/voicetype/secret.key`），使用中那組在執行期放 `cfg["llm"]`（`RUNTIME_KEYS`，`save_config` 不寫出）。改了使用中那組要重設 `cfg["llm"]`（`Api._llm_changed`、`App.use_llm`）；`App.load_cfg` 會把舊設定檔的 LLM 欄位搬進資料庫。`llm_refine` 回傳 `(文字, 是否成功)`，失敗退回原文；編輯模式失敗時不貼上。替換規則在 LLM 之後套用。
 
 設定：`DEFAULTS` 與 `config.json` 一層淺合併，`load_config` 會把新欄位寫回舊設定檔。新增設定只需加在 `DEFAULTS`。
 

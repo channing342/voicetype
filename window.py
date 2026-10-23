@@ -1,6 +1,7 @@
 """歷史紀錄／詞彙管理視窗：WKWebView 載入 ui/index.html，JS 透過 messageHandlers.vt 呼叫 Api。"""
 import base64
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from core import (ASR_CHOICES, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES, app
 
 UI_DIR = Path(__file__).parent / "ui"
 TYPING_CPM = 40  # 估算省下時間用：一般人每分鐘約打 40 個中文字
+HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")  # RFC 9110 token
 
 
 class Api:
@@ -24,13 +26,15 @@ class Api:
     METHODS = {"list", "get", "audio", "delete", "reprocess", "copy", "vocab", "vocab_add", "vocab_remove",
                "repl_set", "repl_remove", "vocab_suggest", "settings", "asr", "asr_set", "home", "hotkey_capture",
                "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart",
-               "llm", "llm_set", "llm_test", "theme_set", "history_days_set"}
+               "llm", "llm_save", "llm_use", "llm_delete", "llm_test", "theme_set", "history_days_set"}
 
     def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None,
-                 system=None):
+                 system=None, llm_store=None):
         """on_asr_change()：設定改了之後通知 App 到 worker 載入新模型；asr_status() → {"loading", "error"}。
-        system：App 本身，提供快捷鍵錄製、權限、重新啟動（見 voicetype.App 的「管理介面」區段）。"""
+        system：App 本身，提供快捷鍵錄製、權限、重新啟動（見 voicetype.App 的「管理介面」區段）。
+        llm_store：llmstore.LLMStore，多組 LLM 設定；使用中那組改了要同步到 cfg["llm"]。"""
         self.h, self.get_cfg, self.config_path, self._copy = history, get_cfg, config_path, copy
+        self.llm_store = llm_store
         self.on_asr_change, self.system = on_asr_change, system
         self.asr_status = asr_status or (lambda: {"loading": False, "error": ""})
 
@@ -138,32 +142,76 @@ class Api:
         return self.asr()
 
     def llm(self):
-        cfg = self.get_cfg()
-        return {k: cfg[k] for k in ("llm_url", "llm_model", "llm_timeout")}
+        """全部 LLM 設定（header 值解密後給頁面編輯）與使用中的 id。"""
+        return {"active": self.llm_store.active()["id"], "profiles": self.llm_store.list()}
 
-    @staticmethod
-    def _llm_fields(url, model, timeout):
-        url, model, timeout = url.strip(), model.strip(), float(timeout)
+    def _llm_form(self, form, check_name=True):
+        """驗證頁面表單 {id, name, url, model, timeout, headers: [[名稱, 值], ...]}，回傳 profile（headers 為 dict）。"""
+        name, url, model = (str(form.get(k) or "").strip() for k in ("name", "url", "model"))
+        timeout = float(form.get("timeout") or 0)
+        if check_name and not name:
+            raise ValueError("請填設定名稱")
+        if check_name and any(p["name"] == name and p["id"] != form.get("id") for p in self.llm_store.list()):
+            raise ValueError(f"已經有叫「{name}」的設定")
         if not url.startswith(("http://", "https://")):
             raise ValueError("網址要以 http:// 或 https:// 開頭")
         if not model:
             raise ValueError("請填模型名稱")
         if not 1 <= timeout <= 120:
             raise ValueError("逾時要在 1 到 120 秒之間")
-        return {"llm_url": url, "llm_model": model, "llm_timeout": int(timeout) if timeout.is_integer() else timeout}
+        hdrs = {}
+        for hname, value in form.get("headers") or []:  # 兩格都空的列略過
+            hname, value = hname.strip(), value.strip()
+            if not hname and not value:
+                continue
+            if not HEADER_NAME.fullmatch(hname):
+                raise ValueError(f"Header 名稱不合法：{hname or '（空白）'}")
+            if hname.lower() in {k.lower() for k in hdrs}:
+                raise ValueError(f"Header 重複：{hname}")
+            if any(c in value for c in "\r\n"):
+                raise ValueError(f"Header 值不能換行：{hname}")
+            hdrs[hname] = value
+        return {"id": form.get("id") or None, "name": name, "url": url, "model": model,
+                "timeout": int(timeout) if timeout.is_integer() else timeout, "headers": hdrs}
 
-    def llm_set(self, url, model, timeout):
-        self.get_cfg().update(self._llm_fields(url, model, timeout))
-        self._save()
+    def _llm_find(self, pid):
+        p = self.llm_store.get(pid)
+        if not p:
+            raise ValueError("找不到這組設定，可能已經刪除")
+        return p
+
+    def _llm_changed(self):
+        self.get_cfg()["llm"] = self.llm_store.active()
         if self.system:
-            self.system.config_changed()  # 選單列的「LLM 逾時」勾選要跟著變
+            self.system.config_changed()  # 選單列的 LLM 設定與逾時勾選要跟著變
+
+    def llm_save(self, form):
+        """新增（沒有 id）或更新一組設定。回傳 llm() 加上 saved（該組 id）。"""
+        profile = self._llm_form(form)
+        if profile["id"]:
+            self._llm_find(profile["id"])
+        pid = self.llm_store.save(profile)
+        self._llm_changed()
+        return {**self.llm(), "saved": pid}
+
+    def llm_use(self, pid):
+        self.llm_store.use(self._llm_find(pid)["id"])
+        self._llm_changed()
         return self.llm()
 
-    def llm_test(self, url, model, timeout):
+    def llm_delete(self, pid):
+        p = self._llm_find(pid)
+        if p["id"] == self.llm_store.active()["id"]:
+            raise ValueError("使用中的設定不能刪除，先切換到其他組")
+        self.llm_store.delete(p["id"])
+        self._llm_changed()
+        return self.llm()
+
+    def llm_test(self, form):
         """用表單上（還沒儲存）的值送一句測試，回傳 {ms, reply}；失敗直接拋出例外給頁面顯示。"""
-        cfg = {**self.get_cfg(), **self._llm_fields(url, model, timeout)}
+        profile = self._llm_form(form, check_name=False)
         t0 = time.time()
-        reply = chat([{"role": "user", "content": "只回答「OK」兩個字母"}], cfg)
+        reply = chat([{"role": "user", "content": "只回答「OK」兩個字母"}], self.get_cfg(), profile=profile)
         return {"ms": round((time.time() - t0) * 1000), "reply": reply[:200]}
 
     def home(self):

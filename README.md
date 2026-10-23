@@ -21,7 +21,7 @@
 | 管理介面首頁 | **⌥⌘,** 或選單列 →「打開 Voicetype」：各模式的快捷鍵（點一下按鍵就能重新錄製、可恢復預設）、權限狀態、使用統計、目前的辨識模型；可切換系統／淺色／深色 |
 | 歷史紀錄 | 管理介面 →「歷史紀錄」：搜尋、播放錄音、切換 AI 整理後／原文／分段、複製、換模式重新處理、刪除 |
 | 詞彙管理 | 選單列 →「詞彙管理…」；也可以在歷史紀錄中選取一段文字直接加入，或請 DGX 從最近的紀錄建議詞彙 |
-| LLM 設定 | 管理介面 →「設定」→「LLM 整理」：API 網址、模型、逾時秒數，可以先「測試連線」再儲存 |
+| LLM 設定 | 管理介面 →「設定」→「LLM 整理」：可存多組（右邊清單選取、新增、刪除、設為使用中），每組有 API 網址、模型、逾時秒數、自訂 Header（接 LiteLLM／Bifrost 等閘道用），可以先「測試連線」再儲存。選單列「LLM：名稱」也能切換 |
 | 切換辨識模型 | 管理介面 →「設定」→「語音辨識模型」：Whisper Large V3 Turbo／Qwen3-ASR 0.6B／Qwen3-ASR 1.7B，點選就切換；第一次使用會自動下載 |
 | 錄音浮動視窗 | Classic（波形加狀態列）、Mini（只有波形）、不顯示，三種樣式從選單列切換 |
 | 不污染剪貼簿 | 貼上後還原原本的剪貼簿，Raycast、Paste 這類剪貼簿管理器也不會記錄 |
@@ -53,6 +53,7 @@ flowchart LR
 | `core.py` | 不涉及 GUI 的純邏輯：設定、快捷鍵判斷、辨識、LLM prompt、語氣規則、替換規則、詞彙建議、錄音 |
 | `macos.py` | 系統互動：貼上、讀取選取文字、取得目前的 App 和視窗標題 |
 | `history.py` | 歷史紀錄（SQLite + WAV），過期自動刪除 |
+| `llmstore.py` | 多組 LLM 設定（SQLite，header 值以 Fernet 加密） |
 | `hud.py` | 錄音浮動視窗（原生 NSView 繪製） |
 | `window.py` + `ui/index.html` | 管理介面：首頁、歷史紀錄、詞彙、設定（WKWebView 搭配 JS bridge） |
 | `install.sh` | 產生並載入 LaunchAgent |
@@ -88,7 +89,7 @@ uv run python voicetype.py   # 印出「就緒」後即可使用
 | 授權了還是沒反應 | 管理介面按「重新啟動 Voicetype」 |
 | 選單列看不到 🎙 | MacBook 瀏海會擋住放不下的選單列圖示。重新啟動 Voicetype，缺權限時會自動打開管理介面；或關掉幾個選單列 App |
 | 開機後完全沒有啟動 | 舊版 plist 寫死了作者的路徑，在別台電腦上找不到程式。改用 `./install.sh` |
-| 會貼上原文、沒有整理 | 連不到 DGX（`llm_url`），預設的 DGX 只在內部網路可用。到管理介面「設定」改成自己能連的 API，按「測試連線」確認 |
+| 會貼上原文、沒有整理 | 連不到使用中那組 LLM 設定的網址，預設的 DGX 只在內部網路可用。到管理介面「設定」改成自己能連的 API，按「測試連線」確認 |
 
 
 ## 資料位置
@@ -96,18 +97,19 @@ uv run python voicetype.py   # 印出「就緒」後即可使用
 | 位置 | 內容 |
 |---|---|
 | `~/.config/voicetype/config.json` | 設定檔。選單列「開啟設定檔」可以直接編輯，改完按「重新載入設定」 |
-| `~/.local/share/voicetype/history.db` | 歷史紀錄 |
+| `~/.config/voicetype/secret.key` | 加密 LLM header 值的金鑰（權限 600，第一次啟動自動產生）。刪掉的話已存的 header 值解不開，要重新輸入 |
+| `~/.local/share/voicetype/history.db` | 歷史紀錄，以及多組 LLM 設定（`llm_profiles` 表；header 值是密文） |
 | `~/.local/share/voicetype/audio/` | 錄音檔，每筆一個 WAV，1 分鐘約 1.9 MB |
 
 ## 常用設定
+
+以下欄位在 `config.json`。LLM 設定（網址、模型、逾時、Header）不在設定檔裡，存在 `history.db`，請從管理介面「設定」→「LLM 整理」修改；舊設定檔的 `llm_url` 等欄位會在啟動時自動搬過去。
 
 | 欄位 | 預設 | 說明 |
 |---|---|---|
 | `hotkeys` | ⌘, ⌘. ⌘; ⌥⌘, | 清理、整理、編輯、打開管理介面；建議從管理介面首頁錄製 |
 | `asr_model` | `mlx-community/whisper-large-v3-turbo` | 辨識模型，建議從管理介面「設定」切換；也可以填其他 mlx-audio 支援的 repo |
 | `hold_threshold` | 0.4 | 按住超過幾秒算長按 |
-| `llm_url`、`llm_model` | DGX 的 Qwen3.8-Flash-Next | OpenAI 相容的 chat completions API，建議從管理介面「設定」修改 |
-| `llm_timeout` | 10 | LLM 逾時秒數（1–120），管理介面「設定」或選單列都可以改 |
 | `translate_timeout` | 20 | 選取翻譯的逾時秒數（長文翻譯比較慢） |
 | `translate_max_chars` | 4000 | 選取翻譯的長度上限，超過就截斷 |
 | `history_days` | 30 | 歷史紀錄保留天數（1–3650），管理介面「設定」→「歷史紀錄」可以改；啟動時和之後每小時刪除過期紀錄，改短後馬上刪 |

@@ -49,6 +49,12 @@
 - [ ] 手動驗證：實際用滑鼠拖移、拉邊緣縮放與游標形狀；⇧⌘, 在 Slack、Claude Code 送出；提示音聽起來是否干擾
 - [ ] 第二批：Claude Code 整合（hook 跳出最後訊息、語音回覆）、Ask anything（選取 + 說問題，答案顯示在浮動視窗）、轉錄檔案
 
+## LLM 多組設定與自訂 Header（2026-10-23）
+- [x] 自訂 Header（接 LiteLLM／Bifrost），所有 LLM 請求都帶上
+- [x] 多組設定：右邊清單選取、新增、刪除、設為使用中；選單列切換
+- [x] 改存 SQLite（`history.db`），Header 以 Fernet 加密、金鑰獨立檔案；舊設定檔自動搬移
+- [ ] 手動驗證：實際接 Bifrost／LiteLLM，整理、翻譯、測試連線都通
+
 ## 不做（已決定）
 - Whisper 換 4-bit／8-bit 量化版（維持 fp16，辨識度優先）
 - 閒置卸載模型

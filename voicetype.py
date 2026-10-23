@@ -19,6 +19,7 @@ from core import (CONFIG_PATH, KEY_ESC, MOD_FLAGS, MODE_NAMES, RECORD_MODES, SAM
                   apply_replacements, clean_audio, is_too_short_or_silent, llm_refine, load_config, match_hotkey, parse_capture,
                   save_config, transcribe, translate, translate_kind, TRANSLATE_LABELS)
 from history import History
+from llmstore import LLMStore
 from hud import Hud, TranslatePanel
 from window import Api, MainWindow
 
@@ -39,7 +40,8 @@ class App(rumps.App):
         NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory：不顯示 Dock 圖示
         self._edit_menu()
         first_run = not CONFIG_PATH.exists()
-        self.cfg = load_config()
+        self.llm_store = LLMStore()
+        self.cfg = self.load_cfg()
         self.state, self.mode, self.capturing, self.last_text = "idle", None, None, ""
         self.swallow_up = None  # ⇧ 結束錄音時，對應的 keyUp 也要吞掉
         self.ctx, self.stage, self.stage_start, self.flash = {}, None, 0.0, ("", 0.0)
@@ -55,7 +57,7 @@ class App(rumps.App):
         self.switch_asr()  # 預熱模型（也設定 asr_state，要在 Api 之前）
         self.win = MainWindow(Api(self.history, lambda: self.cfg, copy=macos.copy_text,
                                   on_asr_change=self.switch_asr, asr_status=lambda: dict(self.asr_state),
-                                  system=self))
+                                  system=self, llm_store=self.llm_store))
         self.build_menu()
         self.timer = rumps.Timer(self.tick, SLOW)
         self.timer.start()
@@ -87,10 +89,16 @@ class App(rumps.App):
     def build_menu(self):
         self.menu.clear()
         hk = self.cfg["hotkeys"]
+        llm = self.cfg["llm"]
+        llm_menu = rumps.MenuItem(f"LLM：{llm['name']}")
+        for p in self.llm_store.list():
+            item = rumps.MenuItem(p["name"], callback=lambda _, pid=p["id"]: self.use_llm(pid))
+            item.state = int(p["id"] == llm["id"])
+            llm_menu.add(item)
         timeout_menu = rumps.MenuItem("LLM 逾時")
         for s in (5, 10, 20, 30):
-            item = rumps.MenuItem(f"{s} 秒", callback=lambda _, s=s: self.set_cfg("llm_timeout", s))
-            item.state = int(self.cfg["llm_timeout"] == s)
+            item = rumps.MenuItem(f"{s} 秒", callback=lambda _, s=s: self.set_llm_timeout(s))
+            item.state = int(llm["timeout"] == s)
             timeout_menu.add(item)
         hud_menu = rumps.MenuItem("錄音視窗樣式")
         for key, name in (("classic", "Classic"), ("mini", "Mini"), ("none", "不顯示")):
@@ -111,7 +119,7 @@ class App(rumps.App):
             rumps.MenuItem("重新貼上上一次結果", callback=lambda _: self.last_text and macos.paste(self.last_text)),
             None,
             rumps.MenuItem("快捷鍵…", callback=lambda _: self.win.show("home")),
-            hud_menu, timeout_menu,
+            hud_menu, llm_menu, timeout_menu,
             rumps.MenuItem("暫停", callback=self.toggle_pause),
             self._check_item("麥克風就緒提示音", "sound_cue"),
             self._check_item("辨識前去除靜音", "audio_cleanup"),
@@ -136,8 +144,26 @@ class App(rumps.App):
         save_config(self.cfg)
         self.build_menu()
 
+    def load_cfg(self):
+        """讀設定檔；舊版的 LLM 欄位搬進資料庫後存回，使用中的 LLM 設定放進 cfg["llm"]。"""
+        cfg = load_config()
+        if self.llm_store.import_legacy(cfg):
+            save_config(cfg)
+        cfg["llm"] = self.llm_store.active()
+        return cfg
+
+    def use_llm(self, pid):
+        self.llm_store.use(pid)
+        self.cfg["llm"] = self.llm_store.active()
+        self.build_menu()
+
+    def set_llm_timeout(self, s):
+        """選單列的逾時改的是使用中那組 LLM 設定。"""
+        self.llm_store.save({**self.cfg["llm"], "timeout": s})
+        self.use_llm(self.cfg["llm"]["id"])
+
     def reload(self, _):
-        self.cfg = load_config()
+        self.cfg = self.load_cfg()
         self.keys.hold_threshold = self.cfg["hold_threshold"]
         self.build_menu()
 

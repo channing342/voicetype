@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## 2026-10-23：LLM 多組設定、自訂 Header、加密存放
+
+### 新增
+- **多組 LLM 設定**：設定頁「LLM 整理」右邊列出所有設定，可選取編輯、新增、刪除（二次點擊確認）、設為使用中；選單列多了「LLM：名稱」可直接切換。
+  - 設定存在 SQLite（`history.db` 的 `llm_profiles`、`meta` 表，`llmstore.LLMStore`），不再寫進 `config.json`。使用中那組在執行期放在 `cfg["llm"]`，`save_config` 不會寫出。
+  - 使用中的不能刪；名稱不可重複；選單列「LLM 逾時」改的是使用中那組。
+- **自訂 Header**：每組可新增任意多組名稱／值，所有 LLM 請求（整理、編輯、翻譯、詞彙建議、測試連線）都經過 `core.chat`，會一起帶上，方便接 LiteLLM、Bifrost 等閘道。
+  - 名稱需符合 HTTP token 規則、不分大小寫不可重複；值不能含換行（避免 header injection）。兩格都空的列略過。
+- **Header 加密**：整包 header 以 Fernet（`cryptography`）加密後存進資料庫；金鑰在 `~/.config/voicetype/secret.key`（權限 600，第一次啟動自動產生），跟資料庫分開放。畫面上預設遮住，點進欄位才顯示。
+  - 只外流資料庫時看不到 header 值；拿得到整個家目錄的人仍能解開。
+  - 金鑰遺失時，舊的 header 值當成空的，要重新輸入。
+- 舊設定檔的 LLM 欄位（`llm_url`／`llm_model`／`llm_timeout`／`llm_headers`）啟動時自動搬進資料庫，並從 `config.json` 移除。
+
+### 驗證
+- 61 個單元測試通過；新增資料庫加密（資料庫檔案裡找不到明碼）、金鑰權限、金鑰遺失、舊設定搬移、多組設定新增／修改／切換／刪除、header 驗證與實際請求帶 header 的測試。
+- 用真實的 `config.json` 與 `history.db` 複本跑過搬移，歷史紀錄不受影響。設定頁截圖確認版面。
+
 ## 2026-10-23：管理介面 ⌘M、保留天數設定
 
 ### 新增
