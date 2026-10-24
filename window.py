@@ -12,8 +12,9 @@ from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
 
 import time
 
-from core import (ASR_CHOICES, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES, apply_replacements, chat, hf_cached,
-                  llm_refine, match_hotkey, save_config, suggest_vocabulary)
+import macos
+from core import (VERSION, ASR_CHOICES, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES, apply_replacements, chat, find_misheard,
+                  hf_cached, llm_refine, match_hotkey, mic_name, mic_options, save_config, suggest_corrections)
 
 UI_DIR = Path(__file__).parent / "ui"
 TYPING_CPM = 40  # 估算省下時間用：一般人每分鐘約打 40 個中文字
@@ -24,9 +25,11 @@ class Api:
     """頁面可呼叫的方法（只開放 METHODS 內的名稱）。cfg 用 getter 取得，App 重新載入設定後仍指向最新的。"""
 
     METHODS = {"list", "get", "audio", "delete", "reprocess", "copy", "vocab", "vocab_add", "vocab_remove",
-               "repl_set", "repl_remove", "vocab_suggest", "settings", "asr", "asr_set", "home", "hotkey_capture",
+               "repl_set", "repl_remove", "settings", "asr", "asr_set", "home", "hotkey_capture",
                "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart",
-               "llm", "llm_save", "llm_use", "llm_delete", "llm_test", "theme_set", "history_days_set"}
+               "llm", "llm_save", "llm_use", "llm_delete", "llm_test", "theme_set", "history_days_set",
+               "mics", "mic_set", "save_text", "corrections", "correction_apply", "correction_ignore",
+               "corrections_add_all", "record_suggest", "record_apply"}
 
     def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None,
                  system=None, llm_store=None):
@@ -67,8 +70,71 @@ class Api:
         text, ok = llm_refine(r["raw"], mode, cfg, ctx)
         if not ok:
             raise RuntimeError("DGX 未回應，紀錄沒有修改")
-        self.h.update(int(rid), text=apply_replacements(text, cfg), mode=mode, ok=1)
+        self.h.update(int(rid), text=apply_replacements(text, cfg), mode=mode, ok=1, ai_text=None, edited=0)
         return self.h.get(int(rid))
+
+    def save_text(self, rid, text):
+        """手動修改「AI 整理後」：保留修改前的 DGX 輸出（ai_text），比對差異時用來找聽錯的詞。"""
+        rid, r = int(rid), self.h.get(int(rid))
+        ai = r["ai_text"] if r["ai_text"] is not None else r["text"]  # 空字串也是有效的 DGX 輸出
+        self.h.update(rid, text=text, ai_text=ai, edited=int(text != ai))
+        if self.system:
+            self.system.text_edited(rid, text)  # 「重新貼上上一次結果」要用改過的版本
+        return self.h.get(rid)
+
+    def record_suggest(self, rid):
+        r = self.h.get(int(rid))
+        return find_misheard(r["text"], self.get_cfg(), r["raw"])
+
+    def record_apply(self, rid, original, suggestion, add_rule=False):
+        r = self.h.get(int(rid))
+        if original not in r["text"]:
+            raise ValueError("文字已經改過，找不到原本的片段")
+        if add_rule:
+            self.repl_set(original, suggestion)  # 1 個字的規則會在這裡擋下，紀錄也不會被改
+        return self.save_text(rid, r["text"].replace(original, suggestion, 1))
+
+    def corrections(self):
+        return suggest_corrections(self.h.list(limit=500), self.get_cfg())
+
+    def correction_apply(self, src, dst, kind):
+        """kind：repl（加入替換規則）或 vocab（把修正後的詞加入詞彙）。"""
+        if kind == "repl":
+            self.repl_set(src, dst)
+        else:
+            self.vocab_add(dst)
+        return {**self.vocab(), "corrections": self.corrections()}
+
+    def correction_ignore(self, src, dst):
+        cfg, key = self.get_cfg(), f"{src}→{dst}"
+        if key not in cfg["ignored_corrections"]:
+            cfg["ignored_corrections"] = [*cfg["ignored_corrections"], key]
+            self._save()
+        return self.corrections()
+
+    def corrections_add_all(self):
+        """出現 2 次以上的建議全部加成替換規則；1 個字的由 repl_set 擋下、略過。"""
+        added = []
+        for c in self.corrections():
+            if c["count"] >= 2 and len(c["src"].strip()) >= 2:
+                self.repl_set(c["src"], c["dst"])
+                added.append(c)
+        return {**self.vocab(), "corrections": self.corrections(), "added": len(added)}
+
+    def mics(self):
+        cfg = self.get_cfg()
+        return {"current": cfg["mic"], "options": mic_options(macos.input_devices(), cfg["mic"], cfg["mic_name"])}
+
+    def mic_set(self, value):
+        if not isinstance(value, str) or not value:
+            raise ValueError("未知的麥克風")
+        cfg = self.get_cfg()
+        name = mic_name(macos.input_devices(), value) or (cfg["mic_name"] if value == cfg["mic"] else "")
+        cfg["mic"], cfg["mic_name"] = value, name
+        self._save()
+        if self.system:
+            self.system.config_changed()  # 選單列的「麥克風」勾選要跟著變
+        return self.mics()
 
     def copy(self, text):
         if self._copy:
@@ -94,9 +160,13 @@ class Api:
         self._save()
         return self.vocab()
 
-    def repl_set(self, src, dst):
-        if src.strip():
-            self.get_cfg()["replacements"][src.strip()] = dst.strip()
+    def repl_set(self, src, dst, force=False):
+        src = src.strip()
+        # 手動新增時，頁面收到這個錯誤會讓使用者再按一次確認（force=True）；聽錯的詞建議則一律不允許 1 個字
+        if len(src) == 1 and not force:
+            raise ValueError("只有 1 個字的替換規則會換掉所有文字裡的這個字")
+        if src:
+            self.get_cfg()["replacements"][src] = dst.strip()
             self._save()
         return self.vocab()
 
@@ -104,10 +174,6 @@ class Api:
         self.get_cfg()["replacements"].pop(src, None)
         self._save()
         return self.vocab()
-
-    def vocab_suggest(self):
-        texts = [r["raw"] for r in self.h.list(limit=50) if r["raw"]]
-        return suggest_vocabulary(texts, self.get_cfg()) if texts else []
 
     def settings(self):
         cfg = self.get_cfg()
@@ -222,7 +288,7 @@ class Api:
                 "styles": [{"name": r["name"], "style": r["style"]} for r in cfg["app_styles"]],
                 "stats": {**st, "cpm": round(cpm), "saved": max(0, st["chars"] / TYPING_CPM * 60 - st["seconds"]),
                           "ok_rate": round(st["ok"] / st["count"] * 100) if st["count"] else None},
-                "asr": {"name": cur, **self.asr_status()}, "history_days": cfg["history_days"], "theme": cfg["theme"],
+                "asr": {"name": cur, **self.asr_status()}, "history_days": cfg["history_days"], "theme": cfg["theme"], "version": VERSION,
                 **self.system.status()}
 
     def theme_set(self, theme):

@@ -5,6 +5,8 @@ import time
 import wave
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -187,12 +189,6 @@ def test_llm_refine_falls_back_on_timeout_unreachable_and_empty():
     srv.shutdown()
 
 
-def test_suggest_vocabulary_parses_fenced_json_and_dedups():
-    srv = fake_llm(0, '```json\n["Papaya-VPC", "terraform", "OT", "OT"]\n```')
-    assert core.suggest_vocabulary(["..."], cfg_with(llm_url=srv.url)) == ["Papaya-VPC", "OT"]
-    srv.shutdown()
-
-
 def test_parse_capture():
     hk = core.DEFAULTS["hotkeys"]
     cmd = core.MOD_FLAGS["cmd"]
@@ -211,7 +207,7 @@ class FakeStream:
 
     def __init__(self, **kw):
         time.sleep(0.2)
-        self.closed = False
+        self.closed, self.kw = False, kw
         FakeStream.opened.append(self)
 
     def start(self):
@@ -227,7 +223,7 @@ class FakeStream:
 def test_recorder_stop_right_after_start_still_closes_mic(monkeypatch):
     import sys
     import types
-    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(InputStream=FakeStream))
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(InputStream=FakeStream, _terminate=lambda: None, _initialize=lambda: None))
     FakeStream.opened = []
     r = core.Recorder()
     r.start()
@@ -314,6 +310,152 @@ def test_load_config_upgrades_untouched_old_default_prompts(tmp_path):
     assert "旁白" in cfg["prompts"]["clean"] and json.loads(p.read_text())["prompts"]["clean"] == cfg["prompts"]["clean"]
 
 
+DEVS = [{"uid": "iphone", "name": "iPhone 麥克風", "transport": "ccwd", "default": False},
+        {"uid": "airpods", "name": "AirPods", "transport": "blue", "default": True},
+        {"uid": "builtin", "name": "MacBook Air Microphone", "transport": "bltn", "default": False},
+        {"uid": "usb", "name": "Yeti", "transport": "usb ", "default": False},
+        {"uid": "bh", "name": "BlackHole 2ch", "transport": "virt", "default": False}]
+
+
+def with_default(uid):
+    return [{**d, "default": d["uid"] == uid} for d in DEVS]
+
+
+def test_pick_input():
+    assert core.pick_input(DEVS, "auto") == (DEVS[2], "")  # 預設是藍牙 → 內建
+    assert core.pick_input(with_default("usb"), "auto") == (None, "")  # 外接 USB 照用系統預設
+    assert core.pick_input(with_default("bh"), "auto")[0]["uid"] == "builtin"  # 虛擬裝置
+    assert core.pick_input(with_default("iphone"), "auto")[0]["uid"] == "builtin"  # iPhone
+    assert core.pick_input(DEVS, "system") == (None, "")  # 跟隨系統：就算是藍牙也照用
+    assert core.pick_input(DEVS, "usb")[0]["uid"] == "usb"
+    dev, notice = core.pick_input(DEVS, "gone")  # 指定的不在 → 自動規則 + 提示
+    assert dev["uid"] == "builtin" and "找不到" in notice and "MacBook Air Microphone" in notice
+    dev, notice = core.pick_input(with_default("usb"), "gone")
+    assert dev["uid"] == "usb" and "Yeti" in notice
+    no_builtin = [d for d in DEVS if d["uid"] != "builtin"]
+    assert core.pick_input(no_builtin, "auto")[0]["uid"] == "usb"  # 沒有內建：第一個不用避開的
+    assert core.pick_input([d for d in no_builtin if d["uid"] != "usb"], "auto") == (None, "")  # 全部要避開：交給系統
+
+
+def test_pick_input_names_missing_mic_and_sd_index():
+    dev, notice = core.pick_input(DEVS, "gone", "Yeti X")
+    assert notice == "找不到Yeti X，改用MacBook Air Microphone"
+    twins = [{"uid": "a", "name": "USB Mic", "transport": "usb ", "default": False},
+             {"uid": "b", "name": "USB Mic", "transport": "usb ", "default": False}]
+    sd_list = [{"name": "USB Mic", "max_input_channels": 1}, {"name": "Speakers", "max_input_channels": 0},
+               {"name": "USB Mic", "max_input_channels": 1}]
+    assert core.sd_index(twins, twins[0], sd_list) == 0 and core.sd_index(twins, twins[1], sd_list) == 2  # 同名靠排序
+    assert core.sd_index(twins, twins[1], sd_list[:2]) is None  # PortAudio 少一支：對不上
+    padded = [{**twins[0], "name": "USB Mic  "}]
+    assert core.sd_index(padded, padded[0], sd_list) == 0  # 名稱尾端的空白不影響
+    assert core.mic_name(DEVS, "usb") == "Yeti" and core.mic_name(DEVS, "auto") == ""
+    assert core.mic_options(DEVS, "gone", "Yeti X")[-1]["name"] == "Yeti X（未連接）"
+
+
+def test_mic_options():
+    opts = core.mic_options(DEVS, "auto")
+    assert [o["id"] for o in opts[:2]] == ["auto", "system"] and len(opts) == 2 + len(DEVS)
+    assert "（藍牙）" in opts[3]["name"] and "（內建）" in opts[4]["name"]
+    assert core.mic_options(DEVS, "unplugged")[-1] == {"id": "unplugged", "name": "指定的麥克風（未連接）"}
+
+
+def test_recorder_uses_chosen_device(monkeypatch):
+    import sys
+    import types
+    calls = []
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(
+        InputStream=FakeStream, _terminate=lambda: calls.append("term"), _initialize=lambda: calls.append("init")))
+    FakeStream.opened = []
+    r = core.Recorder(lambda sd: (7, "內建麥克風", "找不到指定的麥克風"))
+    r.start().result(timeout=2)
+    assert calls == ["term", "init"] and FakeStream.opened[0].kw["device"] == 7  # 每次都重讀裝置清單
+    assert (r.mic_label, r.mic_notice) == ("內建麥克風", "找不到指定的麥克風")
+    r.start()  # 下一輪開始時先清掉，避免顯示上一輪的
+    assert r.mic_label == ""
+    r.stop().result(timeout=2)
+
+
+def test_split_chunks_and_join():
+    sr = core.SAMPLE_RATE
+    loud = lambda sec: (0.3 * np.ones(int(sec * sr))).astype(np.float32)
+    quiet = lambda sec: np.zeros(int(sec * sr), np.float32)
+    audio = np.concatenate([loud(24), quiet(0.3), loud(25), quiet(0.3), loud(20)])  # 約 70 秒
+    chunks = core.split_chunks(audio)
+    assert len(chunks) == 3 and all(len(c) <= core.CHUNK_SEC * sr for _, c in chunks)
+    assert 24.0 <= chunks[1][0] / sr <= 24.3  # 切在停頓裡
+    assert sum(len(c) for _, c in chunks) == len(audio)
+    short = core.split_chunks(loud(10))
+    assert len(short) == 1 and short[0][0] == 0 and len(short[0][1]) == 10 * sr
+    assert core.join_text("hello", "world") == "hello world" and core.join_text("你好", "世界") == "你好世界"
+    assert core.join_text("用 AWS", "部署") == "用 AWS部署" and core.join_text("", "x") == "x"
+
+
+def test_transcribe_offsets_chunk_segments(monkeypatch):
+    sr = core.SAMPLE_RATE
+    audio = np.concatenate([0.3 * np.ones(25 * sr), np.zeros(sr // 2), 0.3 * np.ones(20 * sr)]).astype(np.float32)
+    seen = []
+
+    def fake(chunk, cfg):
+        seen.append(len(chunk))
+        return f"第{len(seen)}段", [{"start": 1.0, "end": 2.0, "text": f"第{len(seen)}段"}]
+    monkeypatch.setattr(core, "transcribe_chunk", fake)
+    text, segs = core.transcribe(audio, cfg_with())
+    assert text == "第1段第2段" and len(seen) == 2
+    assert segs[0]["start"] == 1.0 and 25 < segs[1]["start"] < 27  # 第二段的時間加上切點位移
+
+
+def test_diff_pairs():
+    assert core.diff_pairs("我們有些全線要調整", "我們有些權限要調整。") == [("全線", "權限")]
+    assert core.diff_pairs("記得跑 terra form plan", "記得跑 Terraform plan") == [("terra form", "Terraform")]
+    assert core.diff_pairs("你好，世界", "你好世界。") == []  # 只差標點
+    assert core.diff_pairs("嗯那個就是我想說的是明天開會", "明天開會") == []  # 刪掉贅字不算聽錯
+    assert core.diff_pairs("a" * 24, "b" * 24) == []  # 太長是改寫
+
+
+def test_suggest_corrections():
+    recs = [
+        {"mode": "clean", "raw": "有些全線要調整", "text": "有些權限要調整。", "ai_text": None, "edited": False},
+        {"mode": "clean", "raw": "全線的部分", "text": "權限的部分。", "ai_text": None, "edited": False},
+        {"mode": "organize", "raw": "全線很亂", "text": "權限很亂", "ai_text": None, "edited": False},  # 整理模式不算
+        {"mode": "english", "raw": "我明天到", "text": "I'll arrive tomorrow", "ai_text": "I'll arrive tomorrow", "edited": False},
+        {"mode": "organize", "raw": "x", "text": "請 Papaya-VPC 開通", "ai_text": "請怕怕呀 VPC 開通", "edited": True},  # 手動改的都算
+        {"mode": "clean", "raw": "歐提帳號", "text": "OT 帳號", "ai_text": None, "edited": False},
+    ]
+    cfg = cfg_with(replacements={"歐提": "OT"})
+    out = core.suggest_corrections(recs, cfg)
+    assert out[0]["src"] == "全線" and out[0]["dst"] == "權限" and out[0]["count"] == 2 and "權限" in out[0]["example"]
+    manual = [c for c in out if c["manual"]]
+    assert manual and manual[0]["dst"].startswith("Papaya")
+    assert not any(c["src"] == "歐提" for c in out)  # 已有替換規則
+    cfg["ignored_corrections"] = ["全線→權限"]
+    assert not any(c["src"] == "全線" for c in core.suggest_corrections(recs, cfg))
+
+
+def test_parse_json_list_tolerates_messy_replies():
+    assert core.parse_json_list('```json\n[{"a": 1}]\n```') == [{"a": 1}]
+    assert core.parse_json_list('[{"a": 1}]\n\n[註：以上為建議]') == [{"a": 1}]  # 後面的說明也有 ]
+    assert core.parse_json_list('{"original": "x"}') == [] and core.parse_json_list("沒有建議") == []
+    assert core.parse_json_list('[{"a": 1') == []  # 不完整
+
+
+def test_find_misheard_validates_original():
+    reply = json.dumps([{"original": "全線", "suggestion": "權限", "reason": "同音"},
+                        {"original": "原文沒有的詞", "suggestion": "X", "reason": "亂編"},
+                        {"original": "全線", "suggestion": "權限", "reason": "重複"},
+                        {"original": "調整", "suggestion": "調整", "reason": "沒改"}, "不是物件"], ensure_ascii=False)
+    srv = fake_llm(0, f"```json\n{reply}\n```")
+    out = core.find_misheard("我們有些全線要調整", cfg_with(llm_url=srv.url), raw="我們有些全線要調整")
+    assert out == [{"original": "全線", "suggestion": "權限", "reason": "同音"}]
+    srv.shutdown()
+
+
+def test_version_single_source():
+    import re
+    import tomllib
+    project = tomllib.loads(Path(core.__file__).with_name("pyproject.toml").read_text())["project"]
+    assert core.VERSION == project["version"] and re.fullmatch(r"\d+\.\d+", core.VERSION)  # 主.次
+
+
 # ---------- 歷史紀錄 ----------
 
 def test_history_stats(tmp_path):
@@ -376,7 +518,7 @@ def test_api_home_and_hotkey_reset(tmp_path):
     api = Api(h, lambda: cfg, config_path=tmp_path / "c.json", system=sysm)
     home = api.call("home", [])["result"]
     assert home["stats"]["cpm"] == 8 and home["stats"]["ok_rate"] == 100 and home["stats"]["saved"] == 0
-    assert home["hotkeys_active"] and home["asr"]["name"] == "Whisper Large V3 Turbo"
+    assert home["version"] == core.VERSION and home["hotkeys_active"] and home["asr"]["name"] == "Whisper Large V3 Turbo"
     assert [s["name"] for s in home["styles"]] == ["郵件", "聊天", "終端機／IDE"]
     api.call("hotkey_capture", ["organize"])
     assert api.call("home", [])["result"]["capturing"] == "organize"
@@ -537,6 +679,97 @@ def test_api_reprocess_keeps_record_when_dgx_fails(tmp_path):
     assert res["ok"] is False and "選取" in res["error"]
 
 
+def test_history_migrates_old_schema_and_edit_fields(tmp_path):
+    import sqlite3
+    db = tmp_path / "history.db"
+    with sqlite3.connect(db) as c:  # 舊版資料庫：沒有 ai_text、edited
+        c.execute("CREATE TABLE recordings (id INTEGER PRIMARY KEY, created REAL, mode TEXT, app TEXT, bundle TEXT,"
+                  " title TEXT, duration REAL, raw TEXT, text TEXT, segments TEXT, ok INTEGER, t_transcribe REAL,"
+                  " t_llm REAL, model TEXT, selection TEXT)")
+        c.execute("INSERT INTO recordings (created, mode, raw, text, segments, ok) VALUES (1, 'clean', 'a', 'b', '[]', 1)")
+    h = History(tmp_path)
+    r = h.list()[0]
+    assert r["edited"] is False and r["ai_text"] is None and r["text"] == "b"
+
+
+def test_api_save_text_record_apply_and_reprocess(tmp_path):
+    from window import Api
+    cfg = cfg_with()
+    h = History(tmp_path)
+    edited = []
+    sysm = type("S", (), {"text_edited": lambda self, rid, t: edited.append((rid, t)), "config_changed": lambda self: None})()
+    api = Api(h, lambda: cfg, config_path=tmp_path / "c.json", system=sysm)
+    rid = h.add(np.zeros(800, np.float32), mode="clean", raw="有些全線要調整", text="有些全線要調整。", ok=1)
+    r = api.call("save_text", [rid, "有些權限要調整。"])["result"]
+    assert r["edited"] and r["ai_text"] == "有些全線要調整。" and edited == [(rid, "有些權限要調整。")]
+    assert api.call("save_text", [rid, "有些全線要調整。"])["result"]["edited"] is False  # 改回原樣就不算修改
+    empty = h.add(np.zeros(800, np.float32), mode="clean", raw="嗯", text="", ok=1)
+    api.call("save_text", [empty, "補上"])
+    assert h.get(empty)["ai_text"] == "" and h.get(empty)["edited"]
+    assert api.call("save_text", [empty, "再改一次"])["result"]["ai_text"] == ""  # 空字串的 DGX 輸出不會被蓋掉
+
+    res = api.call("record_apply", [rid, "全", "權", True])  # 1 個字不能加成規則，紀錄也不動
+    assert res["ok"] is False and "1 個字" in res["error"] and h.get(rid)["text"] == "有些全線要調整。"
+    r = api.call("record_apply", [rid, "全線", "權限", True])["result"]
+    assert r["text"] == "有些權限要調整。" and r["edited"] and cfg["replacements"] == {"全線": "權限"}
+    assert api.call("record_apply", [rid, "全線", "權限", False])["ok"] is False  # 已經改過了
+
+    srv = fake_llm(0, "有些權限要調整。")
+    cfg["llm"]["url"] = srv.url
+    r = api.call("reprocess", [rid, "clean"])["result"]
+    assert r["edited"] is False and r["ai_text"] is None  # 重新處理後以 DGX 新結果為準
+    srv.shutdown()
+
+
+def test_api_corrections_flow(tmp_path):
+    from window import Api
+    cfg = cfg_with()
+    h = History(tmp_path)
+    api = Api(h, lambda: cfg, config_path=tmp_path / "c.json")
+    for raw, text in (("全線要調整", "權限要調整。"), ("全線的部分", "權限的部分。"), ("早上開會", "早上開會"),
+                      ("冇問題", "沒問題。")):
+        h.add(np.zeros(800, np.float32), mode="clean", raw=raw, text=text, ok=1)
+    out = api.call("corrections", [])["result"]
+    assert [(c["src"], c["count"]) for c in out] == [("全線", 2), ("冇", 1)]
+    assert api.call("correction_apply", ["冇", "沒", "repl"])["ok"] is False  # 1 個字只能加詞彙或忽略
+    v = api.call("correction_apply", ["冇", "沒", "vocab"])["result"]
+    assert "沒" in v["vocabulary"]
+    assert api.call("correction_ignore", ["冇", "沒"])["result"] == [c for c in out if c["src"] == "全線"]
+    api.call("correction_ignore", ["冇", "沒"])
+    assert cfg["ignored_corrections"] == ["冇→沒"]  # 重複忽略不會重複寫入
+    v = api.call("corrections_add_all", [])["result"]
+    assert v["added"] == 1 and v["replacements"] == {"全線": "權限"} and v["corrections"] == []
+    saved = json.loads((tmp_path / "c.json").read_text())
+    assert saved["replacements"] == {"全線": "權限"} and saved["ignored_corrections"] == ["冇→沒"]
+
+
+def test_api_repl_set_single_char_needs_force(tmp_path):
+    from window import Api
+    cfg = cfg_with()
+    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json")
+    assert api.call("repl_set", ["的", "得"])["ok"] is False and cfg["replacements"] == {}
+    assert api.call("repl_set", ["的", "得", True])["ok"] and cfg["replacements"] == {"的": "得"}
+
+
+def test_api_mics(tmp_path, monkeypatch):
+    import macos
+    from window import Api
+    monkeypatch.setattr(macos, "input_devices", lambda: DEVS)
+    cfg = cfg_with()
+    changed = []
+    sysm = type("S", (), {"config_changed": lambda self: changed.append(1)})()
+    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json", system=sysm)
+    m = api.call("mics", [])["result"]
+    assert m["current"] == "auto" and len(m["options"]) == 2 + len(DEVS)
+    assert api.call("mic_set", ["usb"])["result"]["current"] == "usb" and changed == [1]
+    saved = json.loads((tmp_path / "c.json").read_text())
+    assert saved["mic"] == "usb" and saved["mic_name"] == "Yeti"
+    monkeypatch.setattr(macos, "input_devices", lambda: [])  # 拔掉後再選同一支：名稱保留
+    assert api.call("mic_set", ["usb"])["result"]["options"][-1]["name"] == "Yeti（未連接）"
+    assert api.call("mic_set", ["auto"])["ok"] and cfg["mic_name"] == ""
+    assert api.call("mic_set", [""])["ok"] is False
+
+
 # ---------- macOS 介面元件 ----------
 
 def test_paste_restores_clipboard_and_marks_transient(monkeypatch):
@@ -662,6 +895,9 @@ def test_hud_bars_and_panel():
     import hud
     assert hud.bar_heights([], 4) == [0.06] * 4
     assert hud.bar_heights([1.0], 2) == [0.06, 1.0]  # 超過滿刻度也不越界
+    quiet, speech, loud = hud.bar_heights([10 ** (-61 / 20), 10 ** (-36 / 20), 10 ** (-24 / 20)], 3)
+    assert quiet == 0.06 and 0.5 < speech < 0.6 and loud > 0.85  # dB 刻度：安靜只剩一格、講話亮過半
+    assert hud.bar_heights([], 3, busy=True, t=1.0, reduce_motion=True) == hud.bar_heights([], 3, busy=True, t=2.0, reduce_motion=True)
     assert all(0 < v < 0.3 for v in hud.bar_heights([], 5, busy=True, t=1.0))
     h = hud.Hud()
     for style, busy in (("classic", False), ("classic", True), ("mini", False), ("mini", True)):
@@ -718,14 +954,6 @@ def test_e2e_edit_mode_translates_selection():
     print(f"\nout={out}")
     assert ok and ("10" in out or "ten" in out.lower())
     assert not any("一" <= c <= "鿿" for c in out)
-
-
-@pytest.mark.e2e
-def test_e2e_suggest_vocabulary():
-    words = core.suggest_vocabulary(["我們要把 Papaya-VPC 跟 Strawberry-VPC 透過 DXGW 打通",
-                                     "Papaya-VPC 的路由表要更新"], cfg_with())
-    print(f"\nwords={words}")
-    assert any("Papaya" in w for w in words)
 
 
 @pytest.mark.e2e
@@ -825,6 +1053,7 @@ def app(tmp_path, monkeypatch):
     a.listener, a.tap_disabled, a.tap_checked = FakeListener(), False, 0.0
     a.tpanel, a.tr_seq = FakePanel(), 0
     a.swallow_up = None
+    a.last_id, a.mic_uids = None, ()
     monkeypatch.setattr(voicetype.rumps, "notification", lambda *x: a.notes.append(x))
     monkeypatch.setattr(voicetype, "save_config", lambda cfg: None)
     monkeypatch.setattr(a, "build_menu", lambda: None, raising=False)
@@ -1206,3 +1435,73 @@ def test_app_load_cfg_imports_legacy_llm_and_attaches_active(app, tmp_path, monk
     assert cfg["llm"]["model"] == "old-model" and "llm_model" not in saved[0]
     monkeypatch.setattr(voicetype, "load_config", lambda: cfg_with())
     assert app.load_cfg()["llm"]["model"] == "old-model" and len(saved) == 1  # 沒有舊欄位就不存檔
+
+
+def test_app_choose_mic_and_text_edited(app, monkeypatch):
+    import types
+    import voicetype
+    monkeypatch.setattr(voicetype.macos, "input_devices", lambda: DEVS)
+    sd = types.SimpleNamespace(query_devices=lambda: [
+        {"name": "AirPods", "max_input_channels": 1}, {"name": "MacBook Air Speakers", "max_input_channels": 0},
+        {"name": "MacBook Air Microphone", "max_input_channels": 1}])
+    assert app.choose_mic(sd) == (2, "內建麥克風", "")  # 預設是 AirPods → 內建，狀態列標示
+    app.cfg["mic"] = "system"
+    assert app.choose_mic(sd) == (None, "", "")
+    monkeypatch.setattr(voicetype.macos, "input_devices", lambda: with_default("builtin"))
+    app.cfg["mic"] = "auto"
+    assert app.choose_mic(sd) == (None, "", "")  # 預設本來就是內建：不另外標示
+    app.cfg["mic"], app.cfg["mic_name"] = "usb", "Yeti"
+    assert app.choose_mic(sd) == (None, "", "")  # sounddevice 找不到 Yeti：交給系統預設，不標示錯的名稱
+
+    app.last_id, app.last_text = 5, "舊的"
+    app.text_edited(4, "別筆")
+    assert app.last_text == "舊的"
+    app.text_edited(5, "改過的")
+    assert app.last_text == "改過的"
+
+
+def test_app_process_sets_last_id(app, monkeypatch):
+    import voicetype
+    monkeypatch.setattr(voicetype.macos, "paste", lambda t: None)
+    monkeypatch.setattr(voicetype, "transcribe", lambda audio, cfg: ("原文", []))
+    audio = 0.1 * np.ones(core.SAMPLE_RATE, np.float32)
+    monkeypatch.setattr(voicetype, "llm_refine", lambda *a: ("好", True))
+    app.process(audio, "clean", {})
+    first = app.last_id
+    assert first == app.history.list()[0]["id"]
+    monkeypatch.setattr(voicetype, "llm_refine", lambda text, *a: (text, False))
+    app.process(audio, "edit", {"selection": "x"})  # 編輯模式失敗沒有貼上：不算「上一次結果」
+    assert app.last_id == first
+
+
+@pytest.mark.e2e
+def test_e2e_find_misheard():
+    out = core.find_misheard("我們現在有些全線要調整，然後 Papaya 的路由表要更新", cfg_with(vocabulary=["Papaya-VPC", "權限"]))
+    print(f"\nmisheard={out}")
+    assert any(f["original"] == "全線" and f["suggestion"] == "權限" for f in out)
+
+
+@pytest.mark.e2e
+def test_e2e_long_recording_is_chunked(tmp_path):
+    parts = [tts(tmp_path, t) for t in ("我們明天要更新路由表", "然後檢查一下 DNS 的設定", "最後通知大家維護時間")]
+    gap = np.zeros(core.SAMPLE_RATE * 12, np.float32)
+    audio = np.concatenate([parts[0], gap, parts[1], gap, parts[2]])
+    assert len(audio) > 30 * core.SAMPLE_RATE and len(core.split_chunks(audio)) >= 2
+    raw, segs = core.transcribe(audio, cfg_with())
+    print(f"\nraw={raw}")
+    assert "路由表" in raw and "DNS" in raw.upper() and "維護" in raw
+    starts = [s["start"] for s in segs]
+    assert starts == sorted(starts) and starts[-1] >= core.CHUNK_MIN_SEC  # 第二塊的分段時間有加上切點位移（沒加會從 0 開始）
+
+
+def test_coreaudio_null_string_does_not_crash(monkeypatch):
+    import macos
+    monkeypatch.setattr(macos, "_prop", lambda obj, sel, scope=None: bytes(8))  # CFStringRef 是 NULL
+    assert macos._prop_str(1, "lnam") == ""
+
+
+def test_input_devices_real_coreaudio():
+    import macos
+    devs = macos.input_devices()
+    assert devs and all(d["uid"] and d["name"] and len(d["transport"]) in (0, 4) for d in devs)
+    assert sum(d["default"] for d in devs) <= 1

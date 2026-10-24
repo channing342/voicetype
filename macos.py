@@ -1,4 +1,5 @@
 """macOS 系統互動：剪貼簿貼上、讀取選取文字、目前 App 與視窗資訊。"""
+import ctypes
 import subprocess
 import time
 
@@ -134,6 +135,75 @@ def frontmost_context(include_input=False):
         value = _ax(el, AX.kAXValueAttribute) if el else None
         ctx["input_field"] = str(value)[-2000:] if isinstance(value, str) else ""
     return ctx
+
+
+# ---------- 麥克風清單：CoreAudio（sounddevice 看不到 UID 與連接方式，例如藍牙） ----------
+
+class _Addr(ctypes.Structure):
+    _fields_ = [("selector", ctypes.c_uint32), ("scope", ctypes.c_uint32), ("element", ctypes.c_uint32)]
+
+
+_ca = _cf = None
+_fourcc = lambda s: int.from_bytes(s.encode(), "big")
+SYSTEM_OBJECT, SCOPE_GLOBAL, SCOPE_INPUT = 1, _fourcc("glob"), _fourcc("inpt")
+
+
+def _ca_libs():
+    global _ca, _cf
+    if _ca is None:
+        _ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        _cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        _cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        args = [ctypes.c_uint32, ctypes.POINTER(_Addr), ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        _ca.AudioObjectGetPropertyDataSize.argtypes = args
+        _ca.AudioObjectGetPropertyData.argtypes = [*args, ctypes.c_void_p]
+        _cf.CFStringGetCString.restype = ctypes.c_bool  # 回傳 Boolean（1 byte），用預設的 int 讀會多讀高位元
+        _cf.CFRelease.argtypes = [ctypes.c_void_p]
+    return _ca, _cf
+
+
+def _prop(obj, selector, scope=SCOPE_GLOBAL):
+    """讀一個 CoreAudio 屬性，回傳原始 bytes；讀不到回傳 None。"""
+    ca, _ = _ca_libs()
+    addr, size = _Addr(_fourcc(selector), scope, 0), ctypes.c_uint32(0)
+    if ca.AudioObjectGetPropertyDataSize(obj, ctypes.byref(addr), 0, None, ctypes.byref(size)) or not size.value:
+        return None
+    buf = ctypes.create_string_buffer(size.value)
+    if ca.AudioObjectGetPropertyData(obj, ctypes.byref(addr), 0, None, ctypes.byref(size), buf):
+        return None
+    return buf.raw[:size.value]
+
+
+def _prop_str(obj, selector):
+    raw = _prop(obj, selector)
+    if not raw or len(raw) < ctypes.sizeof(ctypes.c_void_p):
+        return ""
+    _, cf = _ca_libs()
+    ref = ctypes.c_void_p.from_buffer_copy(raw).value
+    if not ref:  # CFRelease(NULL) 會讓整個程式崩潰
+        return ""
+    out = ctypes.create_string_buffer(1024)
+    ok = cf.CFStringGetCString(ref, out, 1024, 0x08000100)  # kCFStringEncodingUTF8
+    cf.CFRelease(ref)
+    return out.value.decode() if ok else ""
+
+
+def input_devices():
+    """有輸入聲道的裝置：[{uid, name, transport（四字元碼，例如 bltn／blue／usb ）, default}]。"""
+    ids = _prop(SYSTEM_OBJECT, "dev#") or b""
+    default = _prop(SYSTEM_OBJECT, "dIn ")
+    default = int.from_bytes(default, "little") if default else None
+    out = []
+    for i in range(0, len(ids), 4):
+        dev = int.from_bytes(ids[i:i + 4], "little")
+        streams = _prop(dev, "stm#", SCOPE_INPUT)  # 輸入串流的數量 > 0 才是麥克風
+        if not streams:
+            continue
+        t = _prop(dev, "tran")
+        transport = int.from_bytes(t, "little").to_bytes(4, "big").decode("latin-1") if t else ""
+        out.append({"uid": _prop_str(dev, "uid "), "name": _prop_str(dev, "lnam"),
+                    "transport": transport, "default": dev == default})
+    return out
 
 
 # 系統設定 →「隱私權與安全性」各頁的網址

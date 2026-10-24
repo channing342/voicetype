@@ -12,7 +12,9 @@ from core import SAMPLE_RATE
 DATA_DIR = Path.home() / ".local/share/voicetype"
 
 FIELDS = ("created", "mode", "app", "bundle", "title", "duration", "raw", "text", "segments",
-          "ok", "t_transcribe", "t_llm", "model", "selection")
+          "ok", "t_transcribe", "t_llm", "model", "selection", "ai_text", "edited")
+# 後來加的欄位：舊資料庫啟動時補上。ai_text＝使用者手動修改前的 DGX 輸出；edited＝是否手動改過
+ADDED = {"ai_text": "TEXT", "edited": "INTEGER DEFAULT 0"}
 
 
 class History:
@@ -24,6 +26,10 @@ class History:
             c.execute("CREATE TABLE IF NOT EXISTS recordings (id INTEGER PRIMARY KEY, created REAL, mode TEXT,"
                       " app TEXT, bundle TEXT, title TEXT, duration REAL, raw TEXT, text TEXT, segments TEXT,"
                       " ok INTEGER, t_transcribe REAL, t_llm REAL, model TEXT, selection TEXT)")
+            have = {r[1] for r in c.execute("PRAGMA table_info(recordings)")}
+            for col, typ in ADDED.items():
+                if col not in have:
+                    c.execute(f"ALTER TABLE recordings ADD COLUMN {col} {typ}")
 
     def _conn(self):
         # ponytail: 每次開新連線，避免跨執行緒共用；寫入量極小不需要連線池
@@ -50,7 +56,7 @@ class History:
     def _row(self, r):
         d = dict(r)
         d["segments"] = json.loads(d["segments"] or "[]")
-        d["ok"] = bool(d["ok"])
+        d["ok"], d["edited"] = bool(d["ok"]), bool(d["edited"])
         return d
 
     def list(self, query="", limit=200):

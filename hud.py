@@ -6,27 +6,35 @@ import objc
 from AppKit import (NSAppearance, NSAttributedString, NSBackingStoreBuffered, NSBezierPath, NSButton, NSColor,
                     NSCursor, NSEvent, NSTrackingArea, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext,
                     NSInsetRect, NSMakeRect, NSObject, NSPanel, NSScreen, NSScrollView, NSStatusWindowLevel, NSTextField,
-                    NSTextView, NSView)
+                    NSTextView, NSView, NSWorkspace)
 from PyObjCTools import AppHelper
 
 SIZES = {"classic": (260, 84), "mini": (150, 34), "mini_text": (210, 34)}
 BARS = {"classic": 36, "mini": 14}
 BAR_W, BAR_GAP = 3, 3
-FULL_SCALE = 0.05  # RMS 到這個值就是滿格
+# dB 刻度（實測 MacBook 麥克風：安靜約 -61 dBFS、喇叭播放的語音 -40～-32、對著講話更大聲）
+DB_FLOOR, DB_FULL, BAR_MIN = -55.0, -20.0, 0.06
 
 
-def bar_heights(levels, n, busy=False, t=0.0):
-    """把最近的 RMS 轉成 0–1 的柱高；處理中改成緩慢起伏的呼吸動畫。"""
+def bar_heights(levels, n, busy=False, t=0.0, reduce_motion=False):
+    """把最近的 RMS 轉成 0–1 的柱高（dB 刻度）；處理中是緩慢起伏的呼吸動畫，「減少動態效果」時改成靜止。"""
     if busy:
+        if reduce_motion:
+            return [0.17] * n
         return [0.12 + 0.1 * (1 + math.sin(t * 5 + i * 0.6)) / 2 for i in range(n)]
     tail = ([0.0] * n + list(levels))[-n:]
-    return [max(0.06, min(1.0, (v / FULL_SCALE) ** 0.7)) for v in tail]
+    return [max(BAR_MIN, min(1.0, (20 * math.log10(max(v, 1e-6)) - DB_FLOOR) / (DB_FULL - DB_FLOOR))) for v in tail]
+
+
+def reduce_motion():
+    return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
 
 
 class WaveView(NSView):
     def initWithFrame_(self, frame):
         self = objc.super(WaveView, self).initWithFrame_(frame)
         self.style, self.levels, self.status, self.busy, self.show_text = "classic", [], "", False, False
+        self.reduce_motion = False
         return self
 
     def isOpaque(self):
@@ -57,7 +65,7 @@ class WaveView(NSView):
         mid = strip + (h - strip) / 2
         x = (w - (n * BAR_W + (n - 1) * BAR_GAP)) / 2
         NSColor.whiteColor().setFill()
-        for v in bar_heights(self.levels, n, self.busy, time.time()):
+        for v in bar_heights(self.levels, n, self.busy, time.time(), self.reduce_motion):
             bh = max(2.0, v * area_h)
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 NSMakeRect(x, mid - bh / 2, BAR_W, bh), BAR_W / 2, BAR_W / 2).fill()
@@ -89,6 +97,7 @@ class Hud:
         """style: classic / mini；busy=True 表示錄音結束、處理中。"""
         v = self.view
         v.style, v.levels, v.status, v.busy = style, levels, status, busy
+        v.reduce_motion = reduce_motion() if busy else False
         v.show_text = style == "mini" and busy
         w, h = SIZES["mini_text" if v.show_text else style]
         f = NSScreen.mainScreen().frame()

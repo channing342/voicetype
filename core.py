@@ -1,4 +1,5 @@
 """純邏輯：設定、快捷鍵判斷、辨識、LLM 整理、替換規則、語氣規則。不碰 GUI，可直接測試。"""
+import difflib
 import fnmatch
 import gc
 import hashlib
@@ -6,12 +7,15 @@ import json
 import os
 import re
 import time
+import tomllib
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
+# 版本號只寫在 pyproject.toml，選單列、管理介面、啟動訊息都從這裡讀
+VERSION = tomllib.loads((Path(__file__).parent / "pyproject.toml").read_text())["project"]["version"]
 CONFIG_PATH = Path.home() / ".config/voicetype/config.json"
 SAMPLE_RATE = 16000
 KEY_ESC, KEY_C, KEY_V, KEY_RETURN = 53, 8, 9, 36
@@ -57,6 +61,9 @@ DEFAULTS = {
     "audio_cleanup": True,  # 辨識前去掉頭尾與過長的靜音、把太小聲的錄音放大，減少 Whisper 的幻覺文字
     "sound_cue": True,  # 麥克風真的打開時播一聲提示音
     "history_days": 30,
+    "mic": "auto",  # auto：避開藍牙／iPhone／虛擬裝置；system：跟系統預設；其他值是指定裝置的 UID
+    "mic_name": "",  # 指定裝置的名稱：沒接上時提示「找不到○○」用
+    "ignored_corrections": [],  # 在「從紀錄找聽錯的詞」按過忽略的「原文→修正」
     "hud_style": "classic",
     "theme": "system",  # system／light／dark：管理介面與翻譯浮動視窗共用
     "context": {"clipboard": False, "input_field": False},
@@ -263,8 +270,41 @@ def load_asr(repo):
         _asr["model"], _asr["repo"] = load(repo), repo
 
 
+CHUNK_SEC, CHUNK_MIN_SEC = 30, 20  # 超過 30 秒就切；切點找 20–30 秒之間最安靜的地方
+
+
+def split_chunks(audio):
+    """長錄音切成每塊 ≤ 30 秒，切在最安靜的 30ms。整段一次送 Whisper 時，咬住一句幻覺會一直重複到結尾。"""
+    chunks, start = [], 0
+    while len(audio) - start > CHUNK_SEC * SAMPLE_RATE:
+        lo, hi = start + CHUNK_MIN_SEC * SAMPLE_RATE, start + CHUNK_SEC * SAMPLE_RATE
+        frames = audio[lo:hi][:(hi - lo) // FRAME * FRAME].reshape(-1, FRAME)
+        cut = lo + int(np.argmin(np.mean(frames ** 2, axis=1))) * FRAME + FRAME // 2
+        chunks.append((start, audio[start:cut]))
+        start = cut
+    chunks.append((start, audio[start:]))
+    return chunks
+
+
+def join_text(a, b):
+    """接兩段辨識文字：英數字相鄰補空白，中文直接接。"""
+    if not a or not b:
+        return a or b
+    return a + (" " if a[-1].isascii() and a[-1].isalnum() and b[0].isascii() and b[0].isalnum() else "") + b
+
+
 def transcribe(audio, cfg):
     """回傳 (全文, 分段 [{start, end, text}])。必須固定在同一條執行緒呼叫（MLX stream 綁執行緒）。"""
+    text, segs = "", []
+    for offset, chunk in split_chunks(audio):
+        t, ss = transcribe_chunk(chunk, cfg)
+        text = join_text(text, t)
+        segs += [{**x, "start": round(x["start"] + offset / SAMPLE_RATE, 2),
+                  "end": round(x["end"] + offset / SAMPLE_RATE, 2)} for x in ss]
+    return text, segs
+
+
+def transcribe_chunk(audio, cfg):
     repo = cfg["asr_model"]
     load_asr(repo)
     if is_whisper(repo):
@@ -376,30 +416,150 @@ def apply_replacements(text, cfg):
     return text
 
 
-def suggest_vocabulary(texts, cfg):
-    """請 DGX 從最近的紀錄找出還沒收錄的專有名詞。回傳 list[str]。"""
-    prompt = ("以下是使用者最近的語音輸入紀錄。找出其中反覆出現、值得加入語音辨識詞彙表的專有名詞"
-              "（產品、服務、公司、專案、技術縮寫、人名），排除一般詞彙與已收錄的詞。"
-              "只輸出 JSON 字串陣列，例如 [\"Terraform\", \"OT\"]，最多 30 個。\n\n已收錄：" +
-              "、".join(cfg["vocabulary"]))
-    out = chat([{"role": "system", "content": prompt}, {"role": "user", "content": "\n---\n".join(texts)}],
-               cfg, timeout=max(cfg["llm"]["timeout"], 60))
-    m = re.search(r"\[.*\]", out, re.S)
-    words = json.loads(m.group(0)) if m else []
-    have = {v.lower() for v in cfg["vocabulary"]}
-    return [w for w in dict.fromkeys(str(x).strip() for x in words) if w and w.lower() not in have]
+# ---------- 聽錯的詞：比對「辨識原文 → DGX 輸出」與「DGX 輸出 → 使用者手動修改」 ----------
+
+TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]*|\s+|.", re.S)  # 英數字整個字一組，其他一個字一組
+NOISE = re.compile(r"[\s\W_]+")  # 只差標點或空白的不算
+# 太長的改動是改寫句子，不是聽錯。以「詞」計算：中文一個字、英文一個單字各算一個
+MAX_SRC_WORDS, MAX_DST_WORDS, MAX_CHARS = 4, 6, 20
+
+
+def diff_pairs(before, after):
+    """回傳 [(原文片段, 修正後)]。"""
+    a, b = TOKEN.findall(before or ""), TOKEN.findall(after or "")
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op != "replace":
+            continue
+        src, dst = "".join(a[i1:i2]).strip(), "".join(b[j1:j2]).strip()
+        if NOISE.sub("", src) == NOISE.sub("", dst) or not NOISE.sub("", src) or not NOISE.sub("", dst):
+            continue
+        words = lambda toks: sum(1 for t in toks if not t.isspace())
+        if words(a[i1:i2]) <= MAX_SRC_WORDS and words(b[j1:j2]) <= MAX_DST_WORDS and max(len(src), len(dst)) <= MAX_CHARS:
+            out.append((src, dst))
+    return out
+
+
+def suggest_corrections(records, cfg):
+    """跨紀錄統計聽錯的詞。只用清理模式（其他模式會改寫或翻譯，比對沒有意義）加上使用者手動改過的地方。
+    回傳 [{src, dst, count, example, manual}]，次數多的在前；已有替換規則或按過忽略的不列。"""
+    ignored = set(cfg["ignored_corrections"])
+    found = {}
+    for r in records:
+        pairs, ai = [], r.get("ai_text")
+        if r["mode"] == "clean":
+            pairs += [(p, False) for p in diff_pairs(r["raw"], ai if ai is not None else r["text"])]
+        if r.get("edited") and ai is not None:
+            pairs += [(p, True) for p in diff_pairs(r["ai_text"], r["text"])]
+        for (src, dst), manual in pairs:
+            if src in cfg["replacements"] or f"{src}→{dst}" in ignored:
+                continue
+            item = found.setdefault((src, dst), {"src": src, "dst": dst, "count": 0, "example": "", "manual": False})
+            item["count"] += 1
+            item["manual"] |= manual
+            if not item["example"]:
+                i = (r["text"] or "").find(dst)
+                item["example"] = (r["text"] or "")[max(0, i - 15):i + len(dst) + 15] if i >= 0 else ""
+    return sorted(found.values(), key=lambda x: (-x["count"], -x["manual"], x["src"]))
+
+
+def parse_json_list(out):
+    """從 LLM 回覆取出第一個 JSON 陣列。前後可能有 ```json 或說明文字（說明裡也可能有 ]），所以從第一個 [ 開始解析一段。"""
+    i = out.find("[")
+    try:
+        items = json.JSONDecoder().raw_decode(out[i:])[0] if i >= 0 else []
+    except json.JSONDecodeError:
+        return []
+    return items if isinstance(items, list) else []
+
+
+def find_misheard(text, cfg, raw=""):
+    """請 DGX 找單筆紀錄裡疑似聽錯的詞。DGX 只能回報「把 original 改成 suggestion」，
+    original 必須一字不差出現在文字裡，否則丟掉（避免 DGX 自己編出原文沒有的詞）。"""
+    prompt = ("下面是語音輸入辨識後再整理過的繁體中文。找出最可能是同音或近音聽錯的詞（專有名詞、技術名詞、人名最常見），"
+              "不要改寫句子、不要改標點或語氣。只輸出 JSON 陣列，每一項是 "
+              '{"original": 文字裡原樣出現的片段, "suggestion": 正確寫法, "reason": 簡短理由}，最多 10 項；沒有就輸出 []。'
+              "文字裡的詞跟使用者的常用詞發音相近、寫法卻不同時，通常就是聽錯。"
+              "\n\n使用者的常用詞：" + "、".join(cfg["vocabulary"]))
+    user = text + (f"\n\n（辨識原文，供參考：{raw}）" if raw and raw != text else "")
+    out = chat([{"role": "system", "content": prompt}, {"role": "user", "content": user}],
+               cfg, timeout=max(cfg["llm"]["timeout"], 30))
+    items, seen, result = parse_json_list(out), set(), []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        o, sug = str(it.get("original", "")).strip(), str(it.get("suggestion", "")).strip()
+        if o and sug and o != sug and o in text and o not in seen:
+            seen.add(o)
+            result.append({"original": o, "suggestion": sug, "reason": str(it.get("reason", "")).strip()})
+    return result
+
+
+def pick_input(devices, setting, name=""):
+    """選麥克風。devices：[{uid, name, transport, default}]（只含有輸入的裝置）；name：指定裝置的名稱（提示用）。
+    回傳 (裝置或 None＝交給系統預設, 提示訊息)。"""
+    default = next((d for d in devices if d["default"]), None)
+    if setting == "system":
+        return None, ""
+    notice = ""
+    if setting != "auto":
+        chosen = next((d for d in devices if d["uid"] == setting), None)
+        if chosen:
+            return chosen, ""
+        notice = f"找不到{name or '指定的麥克風'}"
+    if default and default["transport"] not in AVOID_TRANSPORTS:
+        return (default, f"{notice}，改用{default['name']}") if notice else (None, "")
+    builtin = next((d for d in devices if d["transport"] == "bltn"), None)
+    fallback = builtin or next((d for d in devices if d["transport"] not in AVOID_TRANSPORTS), None)
+    if fallback is None:
+        return None, notice
+    return fallback, (f"{notice}，改用{fallback['name']}" if notice else "")
+
+
+def sd_index(devices, chosen, sd_devices):
+    """CoreAudio 裝置 → sounddevice 編號。sounddevice 拿不到 UID，用名稱對應；
+    同名的裝置靠排序區分（PortAudio 依 CoreAudio 的順序列裝置）。對不上回傳 None。"""
+    name = chosen["name"].strip()  # 名稱前後的空白兩邊不一定一致
+    rank = [d["uid"] for d in devices if d["name"].strip() == name].index(chosen["uid"])
+    same = [i for i, d in enumerate(sd_devices) if d["name"].strip() == name and d["max_input_channels"] > 0]
+    return same[rank] if rank < len(same) else None
+
+
+def mic_name(devices, uid):
+    """設定麥克風時一併記下名稱；auto／system 或找不到時是空字串。"""
+    return next((d["name"] for d in devices if d["uid"] == uid), "")
+
+
+MIC_TAGS = {"blue": "藍牙", "blea": "藍牙", "ccwl": "iPhone", "ccwd": "iPhone", "virt": "虛擬", "grup": "虛擬",
+            "fgrp": "虛擬", "bltn": "內建", "usb ": "USB"}
+
+
+def mic_options(devices, current, name=""):
+    """管理介面與選單列的麥克風選項：[{id, name}]。指定的裝置沒接上時也列出來（標示未連接）。"""
+    opts = [{"id": "auto", "name": "自動（避開藍牙、iPhone、虛擬裝置）"}, {"id": "system", "name": "跟隨系統預設"}]
+    opts += [{"id": d["uid"], "name": d["name"] + (f"（{MIC_TAGS[d['transport']]}）" if d["transport"] in MIC_TAGS else "")}
+             for d in devices]
+    if current not in {o["id"] for o in opts}:
+        opts.append({"id": current, "name": f"{name or '指定的麥克風'}（未連接）"})
+    return opts
+
+
+# CoreAudio transport type（四字元碼）：藍牙會讓整條藍牙連線掉成電話音質；iPhone 切換要 1.5–2 秒；虛擬裝置不是真的麥克風
+AVOID_TRANSPORTS = {"blue", "blea", "ccwl", "ccwd", "virt", "grup", "fgrp"}
 
 
 class Recorder:
     """開關麥克風可能超過 1 秒，不能卡住 event tap。start/stop 立即返回 Future，實際工作在同一條執行緒依呼叫順序執行。
     只用鎖不夠：鎖只保證互斥不保證先後，stop 先搶到鎖的話，之後才開的麥克風就沒人關。"""
 
-    def __init__(self):
+    def __init__(self, choose=None):
+        """choose(sd) → (sounddevice 裝置編號或 None＝系統預設, 狀態列顯示的麥克風名稱, 提示訊息)。"""
         self.chunks, self.levels, self.stream, self.started = [], [], None, 0.0
+        self.choose, self.mic_label, self.mic_notice = choose, "", ""
         self.ops = ThreadPoolExecutor(max_workers=1, thread_name_prefix="recorder")
 
     def start(self):
-        self.started, self.levels = time.time(), []
+        self.started, self.levels, self.mic_label, self.mic_notice = time.time(), [], "", ""
         return self.ops.submit(self._start)
 
     def stop(self):
@@ -409,8 +569,12 @@ class Recorder:
     def _start(self):
         import sounddevice as sd
         self.chunks = []
+        # PortAudio 只在初始化時讀一次裝置清單，App 開著時才接上的耳機看不到；重讀實測約 4ms
+        sd._terminate()
+        sd._initialize()
+        device, self.mic_label, self.mic_notice = self.choose(sd) if self.choose else (None, "", "")
         # 每區塊 50ms，levels 一格就是浮動視窗的一根柱子
-        self.stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+        self.stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=device,
                                      blocksize=SAMPLE_RATE // 20, callback=self._on_audio)
         self.stream.start()
 

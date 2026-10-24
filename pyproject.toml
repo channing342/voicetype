@@ -1,6 +1,6 @@
 [project]
 name = "voicetype"
-version = "0.1.0"
+version = "1.0"  # 主.次：每次發布次版號 +1；設定檔不相容或大改版時主版號 +1、次版號歸 0
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=50.0.2",

@@ -63,6 +63,7 @@ nav {
   background: var(--side);
 }
 nav .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px; padding: 2px 10px 18px; }
+.brand .ver { margin-left: -4px; font-size: 12px; font-weight: 400; color: var(--faint); }
 nav .brand svg { color: var(--accent); }
 nav a {
   display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 10px;
@@ -167,6 +168,20 @@ main.on { display: flex; }
 .dhead .meta { margin: 0; }
 .text { font-size: 16px; line-height: 1.75; white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
 .label { font-size: 12px; color: var(--muted); margin: 14px 0 4px; }
+.edit-text { display: block; width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; line-height: 1.75; color: var(--text); background: transparent;
+  border: 1px dashed transparent; border-radius: 8px; padding: 4px 6px; margin: -5px -7px; resize: none; outline: none; overflow: hidden; }
+.edit-text:hover { border-color: var(--line); }
+.edit-text:focus { border-color: var(--accent); border-style: solid; }
+.fixes { display: flex; flex-direction: column; gap: 6px; }
+#fixes { padding: 0 22px; max-height: 220px; overflow-y: auto; }
+#fixes:not(:empty) { padding-bottom: 10px; }
+.fix { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; flex-wrap: wrap; }
+.fix .pair b { font-weight: 600; }
+.fix .why, .fix .ex { color: var(--muted); font-size: 12px; }
+.fix .ex { flex-basis: 100%; }
+.fix .gap { flex: 1; }
+.fix button { padding: 3px 10px; font-size: 13px; }
+.badge { font-size: 12px; color: var(--accent); }
 .label:first-child { margin-top: 0; }
 .seg { display: flex; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .seg:hover { background: var(--panel-2); }
@@ -256,7 +271,7 @@ main.on { display: flex; }
 </head>
 <body>
 <nav>
-  <div class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"/></svg>Voicetype</div>
+  <div class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"/></svg>Voicetype<span class="ver" id="ver"></span></div>
   <a data-tab="home"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 10.5 12 4l8 6.5V20h-5v-6H9v6H4z"/></svg>首頁</a>
   <a data-tab="history"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>歷史紀錄</a>
   <a data-tab="vocab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 4h11a1 1 0 0 1 1 1v15H7a2 2 0 0 1-2-2V6a2 2 0 0 1 1-2z"/><path d="M5 18a2 2 0 0 1 2-2h11"/></svg>詞彙管理</a>
@@ -306,12 +321,11 @@ main.on { display: flex; }
     </div>
     <table class="rtable" id="repls"></table>
   </div>
-  <div class="card suggest">
-    <h2>從最近紀錄找詞彙</h2>
-    <p class="hint">請 DGX 掃描最近 50 筆紀錄，找出常出現但還沒收錄的專有名詞。</p>
-    <div class="row"><button id="suggest">開始分析</button><span class="status" id="sugStatus"></span></div>
-    <div id="sugList"></div>
-    <div class="row" id="sugActions" style="display:none"><button class="primary" id="sugAdd">加入勾選的詞彙</button></div>
+  <div class="card">
+    <h2>從紀錄找聽錯的詞</h2>
+    <p class="hint">比對清理模式紀錄的「辨識原文 → DGX 整理後」，以及你在歷史紀錄手動改過的地方，列出常被改掉的詞。只在這台 Mac 上比對，不呼叫 DGX。常聽錯的詞加成替換規則最有效：以後一定會換掉。</p>
+    <div class="row"><button id="corrScan">開始分析</button><button id="corrAll" style="display:none">全部加入替換規則（出現 2 次以上）</button><span class="status" id="corrStatus"></span></div>
+    <div class="fixes" id="corrList"></div>
   </div>
 </main>
 
@@ -342,6 +356,12 @@ main.on { display: flex; }
         <button id="llmNew">新增設定</button>
       </aside>
     </div>
+  </div>
+  <div class="card">
+    <h2>麥克風</h2>
+    <p class="hint">「自動」會避開藍牙耳機（AirPods 的麥克風一打開，耳機整條會降成電話音質，開頭也容易被切掉）、iPhone 與虛擬裝置，改用內建麥克風；外接 USB 或有線麥克風照常使用。指定的麥克風沒接上時改用「自動」。</p>
+    <div class="form"><label>使用<select id="micSel"></select></label></div>
+    <div class="status" id="micStatus"></div>
   </div>
   <div class="card">
     <h2>歷史紀錄</h2>
@@ -415,7 +435,7 @@ async function open(id) {
 
 function bodyHtml() {
   const r = current;
-  if (view === "ai") return `<div class="text">${esc(r.text)}</div>`;
+  if (view === "ai") return `<textarea class="edit-text" id="aiText" spellcheck="false" title="可以直接修改，改完按「儲存修改」">${esc(r.text)}</textarea>`;
   if (view === "raw") return r.mode === "edit"
     ? `<div class="label">語音指令</div><div class="text">${esc(r.raw)}</div><div class="label">選取的文字</div><div class="text">${esc(r.selection)}</div>`
     : `<div class="text">${esc(r.raw)}</div>`;
@@ -423,8 +443,10 @@ function bodyHtml() {
     : `<div class="empty">沒有分段資料</div>`;
 }
 
+let infoOpen = false;
 function renderDetail(showInfo = false) {
   const r = current;
+  infoOpen = showInfo;
   $("#detail").innerHTML = `
     <div class="dhead">
       <div class="seg-ctl">
@@ -432,9 +454,10 @@ function renderDetail(showInfo = false) {
         <button data-v="raw" class="${view === "raw" ? "on" : ""}">原文</button>
         <button data-v="seg" class="${view === "seg" ? "on" : ""}">分段</button>
       </div>
-      <span class="meta">${fmtTime(r.created)} · ${esc(r.app || "—")} · ${MODE[r.mode] || r.mode}${r.ok ? "" : ' · <span class="badge-warn">DGX 失敗</span>'}</span>
+      <span class="meta">${fmtTime(r.created)} · ${esc(r.app || "—")} · ${MODE[r.mode] || r.mode}${r.ok ? "" : ' · <span class="badge-warn">DGX 失敗</span>'}${r.edited ? ' · <span class="badge">已手動修改</span>' : ""}</span>
     </div>
     <div class="body" id="dbody">${bodyHtml()}</div>
+    <div class="fixes" id="fixes"></div>
     ${showInfo ? `<dl class="info">
       <dt>時間</dt><dd>${new Date(r.created * 1000).toLocaleString("zh-TW", { hour12: false })}</dd>
       <dt>模式</dt><dd>${MODE[r.mode] || r.mode}</dd>
@@ -444,14 +467,17 @@ function renderDetail(showInfo = false) {
       <dt>辨識耗時</dt><dd>${(r.t_transcribe || 0).toFixed(2)} 秒</dd>
       <dt>DGX 耗時</dt><dd>${(r.t_llm || 0).toFixed(2)} 秒</dd>
       <dt>DGX 結果</dt><dd>${r.ok ? "成功" : '<span class="badge-warn">失敗，使用原文</span>'}</dd>
-      <dt>模型</dt><dd>${esc(r.model || "—")}</dd></dl>` : ""}
+      <dt>模型</dt><dd>${esc(r.model || "—")}</dd>
+      ${r.edited ? `<dt>DGX 原始輸出</dt><dd>${esc(r.ai_text)}</dd>` : ""}</dl>` : ""}
     <div class="player">
       <button id="play" title="播放"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path id="playIcon" d="M7 4.5v15l13-7.5z"/></svg></button>
       <canvas id="wave"></canvas>
       <span class="time" id="ptime">${fmtDur(r.duration || 0)}</span>
     </div>
     <div class="actions">
+      <button id="save" class="primary" style="display:none">儲存修改</button>
       <button id="copy">複製</button>
+      <button id="misheard" title="請 DGX 找這筆文字裡可能是同音聽錯的詞">找可能聽錯的詞</button>
       <select id="rmode">${Object.entries(MODE).filter(([k]) => k !== "edit" || r.selection).map(([k, v]) => `<option value="${k}" ${k === r.mode ? "selected" : ""}>${v}</option>`).join("")}</select>
       <button id="redo">重新處理</button>
       <span class="gap"></span>
@@ -461,8 +487,27 @@ function renderDetail(showInfo = false) {
   document.querySelectorAll(".seg-ctl button").forEach((b) => b.onclick = () => { view = b.dataset.v; renderDetail(showInfo); });
   document.querySelectorAll(".seg").forEach((el) => el.onclick = (e) => { if (!window.getSelection().toString()) seek(+el.dataset.t, true); });
   $("#copy").onclick = async () => { await call("copy", view === "raw" ? r.raw : r.text); flashBtn($("#copy"), "已複製"); };
+  const ta = $("#aiText");
+  if (ta) {
+    const fit = () => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; };
+    fit();
+    ta.oninput = () => { fit(); $("#save").style.display = ta.value !== r.text ? "" : "none"; };
+  }
+  $("#save").onclick = async () => { current = await call("save_text", r.id, $("#aiText").value); renderDetail(showInfo); refresh(); };
+  $("#misheard").onclick = async () => {
+    const b = $("#misheard"); b.disabled = true; b.textContent = "DGX 分析中…";
+    try { fixList = { id: r.id, items: await call("record_suggest", r.id), done: true }; b.textContent = "找可能聽錯的詞"; renderFixes(); }
+    catch (e) { b.textContent = "分析失敗"; b.title = errText(e); }
+    b.disabled = false;
+  };
+  renderFixes();
   $("#redo").onclick = async () => {
-    const b = $("#redo"); b.disabled = true; b.textContent = "DGX 處理中…";
+    const b = $("#redo");
+    if (r.edited && !b.classList.contains("armed")) {  // 手動改過：先提醒會被覆蓋
+      b.classList.add("armed"); b.textContent = "會覆蓋你的修改，再按一次";
+      setTimeout(() => { b.classList.remove("armed"); b.textContent = "重新處理"; }, 3000); return;
+    }
+    b.disabled = true; b.textContent = "DGX 處理中…";
     try { current = await call("reprocess", r.id, $("#rmode").value); view = "ai"; renderDetail(showInfo); refresh(); }
     catch (e) { b.textContent = /DGX/.test(e.message) ? "DGX 未回應，未修改" : "失敗"; b.title = e.message; b.disabled = false; }
   };
@@ -476,6 +521,28 @@ function renderDetail(showInfo = false) {
   $("#play").onclick = togglePlay;
   $("#wave").onclick = (e) => { const c = e.currentTarget; seek((e.offsetX / c.clientWidth) * (audio ? audio.duration : 0), true); };
   drawWave();
+}
+/* 單筆紀錄的「找可能聽錯的詞」：DGX 回報的建議，按「套用」只改這一筆 */
+let fixList = { id: null, items: [] };
+function renderFixes() {
+  const r = current, el = $("#fixes");
+  if (!el) return;
+  if (fixList.id !== r.id) { el.innerHTML = ""; return; }
+  if (!fixList.items.length) { el.innerHTML = fixList.done ? '<div class="status">沒有找到可能聽錯的詞</div>' : ""; return; }
+  el.innerHTML = fixList.items.map((f, i) => `<div class="fix" data-i="${i}">
+      <span class="pair">${esc(f.original)} → <b>${esc(f.suggestion)}</b></span><span class="why">${esc(f.reason)}</span><span class="gap"></span>
+      <label class="why" title="${f.original.length < 2 ? "只有 1 個字，不能加成替換規則" : "以後辨識到這個詞都自動換掉"}"><input type="checkbox" class="rule" ${f.original.length < 2 ? "disabled" : ""}> 也加入替換規則</label>
+      <button class="apply">套用</button><button class="link skip">略過</button></div>`).join("");
+  el.querySelectorAll(".fix").forEach((row) => {
+    const i = +row.dataset.i, f = fixList.items[i];
+    row.querySelector(".skip").onclick = () => { fixList.items.splice(i, 1); renderFixes(); };
+    row.querySelector(".apply").onclick = async () => {
+      try {
+        current = await call("record_apply", r.id, f.original, f.suggestion, row.querySelector(".rule").checked);
+        fixList.items.splice(i, 1); renderDetail(infoOpen); refresh();
+      } catch (e) { row.querySelector(".why").textContent = errText(e); }
+    };
+  });
 }
 function flashBtn(b, t) { const o = b.textContent; b.textContent = t; setTimeout(() => b.textContent = o, 1200); }
 
@@ -521,20 +588,23 @@ window.onresize = drawWave;
 document.addEventListener("mouseup", (e) => {
   if (e.target.closest("#selbar")) return;
   setTimeout(() => {
-    const s = window.getSelection(), t = s.toString().trim();
-    const bar = $("#selbar");
-    if (!t || t.length > 40 || !s.anchorNode || !$("#detail").contains(s.anchorNode)) { bar.style.display = "none"; return; }
-    const r = s.getRangeAt(0).getBoundingClientRect();
+    // 「AI 整理後」是 textarea：裡面選的字不在 window.getSelection()，要讀 selectionStart／End，位置用滑鼠座標
+    const bar = $("#selbar"), ta = e.target.closest("#aiText"), s = window.getSelection();
+    const t = (ta ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : s.toString()).trim();
+    if (!t || t.length > 40 || (!ta && (!s.anchorNode || !$("#detail").contains(s.anchorNode)))) { bar.style.display = "none"; return; }
+    const r = ta ? null : s.getRangeAt(0).getBoundingClientRect();
+    const x = r ? r.left : e.clientX, y = r ? r.top : e.clientY - 12;
     bar.dataset.text = t; $("#selTo").value = "";
     bar.style.display = "flex";
-    bar.style.left = Math.min(window.innerWidth - bar.offsetWidth - 8, Math.max(8, r.left)) + "px";
-    bar.style.top = Math.max(8, r.top - bar.offsetHeight - 8) + "px";
+    bar.style.left = Math.min(window.innerWidth - bar.offsetWidth - 8, Math.max(8, x)) + "px";
+    bar.style.top = Math.max(8, y - bar.offsetHeight - 8) + "px";
   });
 });
 $("#selVocab").onclick = async () => { await call("vocab_add", $("#selbar").dataset.text); flashBtn($("#selVocab"), "已加入"); setTimeout(() => $("#selbar").style.display = "none", 600); };
 $("#selRepl").onclick = async () => {
   const to = $("#selTo").value.trim(); if (!to) { $("#selTo").focus(); return; }
-  await call("repl_set", $("#selbar").dataset.text, to); flashBtn($("#selRepl"), "已加入"); setTimeout(() => $("#selbar").style.display = "none", 600);
+  if (!await setRepl($("#selRepl"), $("#selbar").dataset.text, to, "加入替換規則")) return;
+  flashBtn($("#selRepl"), "已加入"); setTimeout(() => $("#selbar").style.display = "none", 600);
 };
 
 /* ---------- 詞彙管理 ---------- */
@@ -550,23 +620,40 @@ $("#addWord").onclick = async () => { const w = $("#newWord").value.trim(); if (
 $("#newWord").onkeydown = (e) => e.key === "Enter" && $("#addWord").click();
 $("#addRepl").onclick = async () => {
   const s = $("#rSrc").value.trim(), d = $("#rDst").value.trim(); if (!s) return;
-  renderVocab(await call("repl_set", s, d)); $("#rSrc").value = $("#rDst").value = "";
+  if (await setRepl($("#addRepl"), s, d, "新增")) $("#rSrc").value = $("#rDst").value = "";
 };
-$("#suggest").onclick = async () => {
-  const b = $("#suggest"); b.disabled = true; $("#sugStatus").textContent = "DGX 分析中…"; $("#sugList").innerHTML = ""; $("#sugActions").style.display = "none";
+/* 從紀錄找聽錯的詞（本機比對，不呼叫 DGX） */
+function renderCorr(list) {
+  $("#corrStatus").textContent = list.length ? `找到 ${list.length} 個常被改掉的詞` : "沒有找到新的建議（紀錄多一點之後再試）";
+  $("#corrAll").style.display = list.some((c) => c.count >= 2 && c.src.length >= 2) ? "" : "none";
+  $("#corrList").innerHTML = list.map((c, i) => `<div class="fix" data-i="${i}">
+      <span class="pair">${esc(c.src)} → <b>${esc(c.dst)}</b></span><span class="why">${c.count} 次${c.manual ? "・你改過" : ""}</span><span class="gap"></span>
+      <button class="repl" ${c.src.length < 2 ? 'disabled title="只有 1 個字，不能加成替換規則"' : ""}>加入替換規則</button>
+      <button class="vocab">加入詞彙</button><button class="link ignore">忽略</button>
+      ${c.example ? `<span class="ex">「…${esc(c.example)}…」</span>` : ""}</div>`).join("");
+  document.querySelectorAll("#corrList .fix").forEach((row) => {
+    const c = list[+row.dataset.i];
+    const act = async (fn) => { try { await fn(); } catch (e) { row.querySelector(".why").textContent = errText(e); } };
+    row.querySelector(".repl").onclick = () => act(async () => { const v = await call("correction_apply", c.src, c.dst, "repl"); renderVocab(v); renderCorr(v.corrections); });
+    row.querySelector(".vocab").onclick = () => act(async () => { const v = await call("correction_apply", c.src, c.dst, "vocab"); renderVocab(v); renderCorr(v.corrections); });
+    row.querySelector(".ignore").onclick = () => act(async () => renderCorr(await call("correction_ignore", c.src, c.dst)));
+  });
+}
+$("#corrScan").onclick = async () => renderCorr(await call("corrections"));
+$("#corrAll").onclick = async () => { const v = await call("corrections_add_all"); renderVocab(v); renderCorr(v.corrections); $("#corrStatus").textContent = `已加入 ${v.added} 條替換規則`; };
+
+/* 替換規則：只有 1 個字時先警告，再按一次才新增 */
+async function setRepl(btn, src, dst, label) {
   try {
-    const words = await call("vocab_suggest");
-    $("#sugStatus").textContent = words.length ? `找到 ${words.length} 個建議` : "沒有新的建議";
-    $("#sugList").innerHTML = words.map((w) => `<label><input type="checkbox" value="${esc(w)}" checked>${esc(w)}</label>`).join("");
-    $("#sugActions").style.display = words.length ? "flex" : "none";
-  } catch (e) { $("#sugStatus").textContent = "分析失敗：" + e.message; }
-  b.disabled = false;
-};
-$("#sugAdd").onclick = async () => {
-  const ws = [...document.querySelectorAll("#sugList input:checked")].map((i) => i.value);
-  renderVocab(await call("vocab_add", ws)); $("#sugList").innerHTML = ""; $("#sugActions").style.display = "none";
-  $("#sugStatus").textContent = `已加入 ${ws.length} 個詞彙`;
-};
+    renderVocab(await call("repl_set", src, dst, btn.classList.contains("armed")));
+    btn.classList.remove("armed"); btn.textContent = label; return true;
+  } catch (e) {
+    if (!/1 個字/.test(e.message)) throw e;
+    btn.classList.add("armed"); btn.textContent = "只有 1 個字，會換掉所有這個字，再按一次確定";
+    setTimeout(() => { btn.classList.remove("armed"); btn.textContent = label; }, 4000);
+    return false;
+  }
+}
 
 /* ---------- 設定：辨識模型 ---------- */
 let asrPoll;
@@ -587,7 +674,21 @@ function renderAsr(a) {
     renderAsr(await call("asr_set", el.dataset.id)); pollAsr();
   });
 }
-async function loadAsr() { const a = await call("asr"); renderAsr(a); if (a.loading) pollAsr(); loadLlm(); loadHistoryDays(); }
+async function loadAsr() { const a = await call("asr"); renderAsr(a); if (a.loading) pollAsr(); loadLlm(); loadHistoryDays(); loadMics(); }
+let micPoll, micKey = "";
+async function loadMics() {
+  clearTimeout(micPoll);
+  const m = await call("mics"), key = JSON.stringify(m);
+  if (key !== micKey && document.activeElement !== $("#micSel")) {  // 清單有變才重畫，正在選的時候不打斷
+    micKey = key;
+    $("#micSel").innerHTML = m.options.map((o) => `<option value="${esc(o.id)}" ${o.id === m.current ? "selected" : ""}>${esc(o.name)}</option>`).join("");
+  }
+  if (document.querySelector("#settings.on")) micPoll = setTimeout(loadMics, 3000);  // 設定頁開著時，接上或拔掉麥克風也會更新
+}
+$("#micSel").onchange = async () => {
+  try { await call("mic_set", $("#micSel").value); $("#micStatus").innerHTML = '<span class="ok-text">已儲存，下一次錄音生效</span>'; }
+  catch (e) { $("#micStatus").innerHTML = `<span class="badge-warn">${esc(errText(e))}</span>`; }
+};
 async function loadHistoryDays() { $("#historyDays").value = (await call("settings")).history_days; }
 $("#historySave").onclick = async () => {
   try {
@@ -700,6 +801,7 @@ const STAT_IC = {
 const stat = (ic, v, unit) => `<div class="stat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STAT_IC[ic]}</svg><b>${v}</b><span>${unit}</span></div>`;
 
 function renderSide(h) {
+  $("#ver").textContent = "v" + h.version;
   $("#sideStatus").innerHTML = `<div class="k">快捷鍵</div><div class="v"><span class="${h.hotkeys_active ? "dot-ok" : "dot-bad"}"></span>${h.hotkeys_active ? "已啟用" : "未啟用"}</div>
     <div class="k">開啟管理介面</div><div class="v">${esc(h.hotkeys.window.label)}</div>
     <div class="k">紀錄保留</div><div class="v">${h.history_days} 天</div>`;
