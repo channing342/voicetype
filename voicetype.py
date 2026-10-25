@@ -17,14 +17,17 @@ from PyObjCTools import AppHelper
 import macos
 from core import (VERSION, CONFIG_PATH, KEY_ESC, MOD_FLAGS, MODE_NAMES, RECORD_MODES, SAMPLE_RATE, KeyLogic, Recorder,
                   apply_replacements, clean_audio, is_too_short_or_silent, llm_refine, load_config, match_hotkey, parse_capture,
-                  mic_name, mic_options, pick_input, sd_index, save_config, transcribe, translate, translate_kind, TRANSLATE_LABELS)
+                  mic_name, mic_options, pick_input, resolve_lang, sd_index, save_config, transcribe, translate, translate_kind, TRANSLATE_LABELS)
 from history import History
 from llmstore import LLMStore
 from hud import Hud, TranslatePanel
 from window import Api, MainWindow
+from i18n import Labels, get_lang, set_lang, t
 
 ICONS = {"idle": "🎙", "recording": "🔴", "busy": "⏳", "paused": "⏸"}
-STAGES = {"transcribe": "辨識中…", "llm": "DGX 整理中…"}
+
+
+STAGES = Labels({"transcribe": "stage_transcribe", "llm": "stage_llm"})
 FAST, SLOW = 1 / 30, 0.5  # 有畫面要動時 30fps；閒置時 2 次/秒，避免空轉吃 CPU
 PURGE_EVERY = 3600  # 常駐不重開，每小時刪一次過期紀錄
 TAP_CHECK = 2  # 每 2 秒檢查 event tap 是否還活著，也檢查麥克風清單有沒有變
@@ -90,19 +93,21 @@ class App(rumps.App):
 
     def build_menu(self):
         self.menu.clear()
+        if hasattr(self, "tpanel") and self.tpanel:
+            self.tpanel.update_i18n()
         hk = self.cfg["hotkeys"]
         llm = self.cfg["llm"]
-        llm_menu = rumps.MenuItem(f"LLM：{llm['name']}")
+        llm_menu = rumps.MenuItem(t("menu_llm", name=llm['name']))
         for p in self.llm_store.list():
             item = rumps.MenuItem(p["name"], callback=lambda _, pid=p["id"]: self.use_llm(pid))
             item.state = int(p["id"] == llm["id"])
             llm_menu.add(item)
-        timeout_menu = rumps.MenuItem("LLM 逾時")
+        timeout_menu = rumps.MenuItem(t("menu_llm_timeout"))
         for s in (5, 10, 20, 30):
-            item = rumps.MenuItem(f"{s} 秒", callback=lambda _, s=s: self.set_llm_timeout(s))
+            item = rumps.MenuItem(t("menu_seconds", s=s), callback=lambda _, s=s: self.set_llm_timeout(s))
             item.state = int(llm["timeout"] == s)
             timeout_menu.add(item)
-        mic_menu = rumps.MenuItem("麥克風")
+        mic_menu = rumps.MenuItem(t("menu_mic"))
         devices = macos.input_devices()
         self.mic_uids = tuple(d["uid"] for d in devices)
         for i, o in enumerate(mic_options(devices, self.cfg["mic"], self.cfg["mic_name"])):
@@ -111,34 +116,34 @@ class App(rumps.App):
             item = rumps.MenuItem(o["name"], callback=lambda _, v=o["id"]: self.set_mic(v))
             item.state = int(o["id"] == self.cfg["mic"])
             mic_menu.add(item)
-        hud_menu = rumps.MenuItem("錄音視窗樣式")
-        for key, name in (("classic", "Classic"), ("mini", "Mini"), ("none", "不顯示")):
+        hud_menu = rumps.MenuItem(t("menu_hud_style"))
+        for key, name in (("classic", t("hud_style_classic")), ("mini", t("hud_style_mini")), ("none", t("hud_style_none"))):
             item = rumps.MenuItem(name, callback=lambda _, k=key: self.set_cfg("hud_style", k))
             item.state = int(self.cfg["hud_style"] == key)
             hud_menu.add(item)
         self.menu = [
-            rumps.MenuItem(f"打開 Voicetype（{hk['window']['label']}）", callback=lambda _: self.win.show("home")),
+            rumps.MenuItem(t("menu_open_vt", label=hk['window']['label']), callback=lambda _: self.win.show("home")),
             None,
-            *[rumps.MenuItem(f"開始／結束錄音：{MODE_NAMES[m]}（{hk[m]['label']}）",
+            *[rumps.MenuItem(t("menu_record_mode", mode=MODE_NAMES[m], label=hk[m]['label']),
                              callback=lambda _, m=m: self.toggle(m)) for m in ("clean", "organize", "english")],
-            rumps.MenuItem(f"翻譯選取的文字（{hk['translate']['label']}）",
+            rumps.MenuItem(t("menu_translate_sel", label=hk['translate']['label']),
                            callback=lambda _: threading.Thread(target=self.translate_selection, daemon=True).start()),
             None,
-            rumps.MenuItem("歷史紀錄…", callback=lambda _: self.win.show("history")),
-            rumps.MenuItem("詞彙管理…", callback=lambda _: self.win.show("vocab")),
-            rumps.MenuItem("設定（辨識模型）…", callback=lambda _: self.win.show("settings")),
-            rumps.MenuItem("重新貼上上一次結果", callback=lambda _: self.last_text and macos.paste(self.last_text)),
+            rumps.MenuItem(t("menu_history"), callback=lambda _: self.win.show("history")),
+            rumps.MenuItem(t("menu_vocab"), callback=lambda _: self.win.show("vocab")),
+            rumps.MenuItem(t("menu_settings"), callback=lambda _: self.win.show("settings")),
+            rumps.MenuItem(t("menu_paste_last"), callback=lambda _: self.last_text and macos.paste(self.last_text)),
             None,
-            rumps.MenuItem("快捷鍵…", callback=lambda _: self.win.show("home")),
+            rumps.MenuItem(t("menu_hotkeys"), callback=lambda _: self.win.show("home")),
             mic_menu, hud_menu, llm_menu, timeout_menu,
-            rumps.MenuItem("暫停", callback=self.toggle_pause),
-            self._check_item("麥克風就緒提示音", "sound_cue"),
-            self._check_item("辨識前去除靜音", "audio_cleanup"),
+            rumps.MenuItem(t("menu_pause"), callback=self.toggle_pause),
+            self._check_item(t("menu_sound_cue"), "sound_cue"),
+            self._check_item(t("menu_audio_cleanup"), "audio_cleanup"),
             None,
-            rumps.MenuItem("開啟設定檔", callback=lambda _: subprocess.run(["open", "-t", str(CONFIG_PATH)])),
-            rumps.MenuItem("重新載入設定", callback=self.reload),
+            rumps.MenuItem(t("menu_open_config"), callback=lambda _: subprocess.run(["open", "-t", str(CONFIG_PATH)])),
+            rumps.MenuItem(t("menu_reload_config"), callback=self.reload),
             rumps.MenuItem(f"Voicetype v{VERSION}"),  # 沒有 callback：灰色、不能點，只顯示版本
-            rumps.MenuItem("結束", callback=rumps.quit_application),
+            rumps.MenuItem(t("menu_quit"), callback=rumps.quit_application),
         ]
 
     def _check_item(self, title, key):
@@ -159,6 +164,8 @@ class App(rumps.App):
 
     def set_cfg(self, key, value):
         self.cfg[key] = value
+        if key == "ui_lang":
+            set_lang(resolve_lang(value, macos.system_language()))
         save_config(self.cfg)
         self.build_menu()
 
@@ -168,6 +175,7 @@ class App(rumps.App):
         if self.llm_store.import_legacy(cfg):
             save_config(cfg)
         cfg["llm"] = self.llm_store.active()
+        set_lang(resolve_lang(cfg.get("ui_lang", "auto"), macos.system_language()))
         return cfg
 
     def use_llm(self, pid):
@@ -187,7 +195,7 @@ class App(rumps.App):
 
     def toggle_pause(self, sender):
         if self.state not in ("idle", "paused"):
-            self.set_flash("錄音或處理中無法暫停", 1.5)
+            self.set_flash(t("flash_cannot_pause"), 1.5)
             return
         self.state = "paused" if self.state == "idle" else "idle"
         sender.state = int(self.state == "paused")
@@ -200,7 +208,7 @@ class App(rumps.App):
     def capture(self, mode):
         """下一個按鍵由 intercept 攔下，交給 save_capture 存檔。"""
         if not self.listener.is_alive():
-            raise RuntimeError("快捷鍵功能還沒啟用，請先允許「輔助使用」權限")
+            raise RuntimeError(t("err_hotkey_not_active"))
         self.capturing = mode
 
     def purge_soon(self):
@@ -248,7 +256,7 @@ class App(rumps.App):
         index = sd_index(devices, dev, sd.query_devices())
         if index is None:  # PortAudio 對不上：交給系統預設，狀態列也就不標示名稱
             return None, "", notice
-        label = "" if dev["default"] else ("內建麥克風" if dev["transport"] == "bltn" else dev["name"])
+        label = "" if dev["default"] else (t("mic_builtin") if dev["transport"] == "bltn" else dev["name"])
         return index, label, notice
 
     def text_edited(self, rid, text):
@@ -272,7 +280,7 @@ class App(rumps.App):
             self.hud.hide()
         elif self.state == "recording":
             el = now - self.rec.started
-            status = f"錄音中（{MODE_NAMES[self.mode]}） {int(el) // 60}:{int(el) % 60:02d}"
+            status = t("hud_recording", mode=MODE_NAMES[self.mode], time=f"{int(el) // 60}:{int(el) % 60:02d}")
             notice = bool(self.rec.mic_notice) and el < MIC_NOTICE_SEC
             if notice:
                 status = self.rec.mic_notice
@@ -281,7 +289,7 @@ class App(rumps.App):
             # Mini 平常只有波形；提示期間改成文字模式（busy），不然看不到「找不到麥克風」
             self.hud.show(style, self.rec.levels, status, notice and style == "mini")
         elif self.state == "busy":
-            self.hud.show(style, [], f"{STAGES.get(self.stage, '處理中…')} {now - self.stage_start:.1f}s", True)
+            self.hud.show(style, [], f"{STAGES.get(self.stage, t('stage_processing'))} {now - self.stage_start:.1f}s", True)
         else:
             self.hud.show(style, [], self.flash[0], True)
         interval = FAST if active else SLOW
@@ -317,7 +325,7 @@ class App(rumps.App):
     def _mic_started(self, fut):
         if fut.exception() and self.state == "recording":
             print(f"開啟麥克風失敗：{fut.exception()!r}", flush=True)
-            self.set_flash("❌ 無法開啟麥克風", 2)
+            self.set_flash(t("flash_mic_failed"), 2)
             self.state = "idle"
         elif not fut.exception() and self.state == "recording" and self.cfg["sound_cue"]:
             AppHelper.callAfter(self.play_cue)
@@ -360,7 +368,7 @@ class App(rumps.App):
             ctx["send"] = send
         except Exception as e:  # job 沒進佇列就不會有 worker 把狀態改回 idle
             print(f"結束錄音失敗：{e!r}", flush=True)
-            self.set_flash(f"❌ 處理失敗：{type(e).__name__}", 2)
+            self.set_flash(t("flash_process_failed", error=type(e).__name__), 2)
             self.state = "idle"
             return
         self.jobs.put((audio, mode, ctx))
@@ -388,7 +396,7 @@ class App(rumps.App):
             return event
         if keycode == KEY_ESC and self.state == "recording":
             if down:
-                self.cancel("已取消")
+                self.cancel(t("flash_cancelled"))
             return None
         if keycode == KEY_ESC and self.tpanel.shown:  # 只在翻譯視窗開著時攔截 Esc
             if down:
@@ -443,7 +451,7 @@ class App(rumps.App):
             return
         anchor = macos.selection_bounds()
         if not text:
-            AppHelper.callAfter(self.tpanel.show_notice, "請先選取文字", anchor, 1.5)
+            AppHelper.callAfter(self.tpanel.show_notice, t("tr_select_first"), anchor, 1.5)
             return
         self.run_translate(text, anchor)
 
@@ -458,7 +466,7 @@ class App(rumps.App):
             AppHelper.callAfter(self.tpanel.show_result, apply_replacements(out, self.cfg), truncated,
                                 TRANSLATE_LABELS[translate_kind(text)])
         else:
-            AppHelper.callAfter(self.tpanel.show_error, "DGX 未回應，請稍後重試")
+            AppHelper.callAfter(self.tpanel.show_error, t("tr_dgx_error"))
 
     def retry_translate(self, source):
         threading.Thread(target=self.run_translate, args=(source, None), daemon=True).start()
@@ -476,7 +484,7 @@ class App(rumps.App):
             self.build_menu()
         self.win.js(f"captureDone({json.dumps({'ok': bool(hk), 'message': msg}, ensure_ascii=False)})")
         if msg and not self.win.visible():  # 錄製到一半關掉視窗時，改用通知告知結果
-            rumps.notification("Voicetype", "已更新" if hk else "未變更", msg)
+            rumps.notification("Voicetype", t("notif_updated") if hk else t("notif_unchanged"), msg)
 
     # ---------- worker：辨識 → DGX → 替換 → 貼上 → 存歷史 ----------
     def worker(self):
@@ -498,37 +506,37 @@ class App(rumps.App):
                     self.process(audio, mode, ctx)
             except Exception as e:
                 print(f"處理失敗：{e!r}", flush=True)
-                self.set_flash(f"❌ 處理失敗：{type(e).__name__}", 2)
+                self.set_flash(t("flash_process_failed", error=type(e).__name__), 2)
             finally:
                 if mode is not None:
                     self.state = "idle"
 
     def process(self, audio, mode, ctx):
         if mode == "edit" and not ctx.get("selection"):
-            self.set_flash("編輯模式需要先選取文字", 2)
+            self.set_flash(t("flash_edit_need_selection"), 2)
             return
         if is_too_short_or_silent(audio, self.cfg):
-            self.set_flash("已略過（太短或無聲）", 1.5)
+            self.set_flash(t("flash_too_short_or_silent"), 1.5)
             return
         audio = clean_audio(audio, self.cfg)  # 歷史紀錄也存清理後的版本，分段時間才對得上播放
         t0 = time.time()
         raw, segments = transcribe(audio, self.cfg)
         t1 = time.time()
         if not raw:
-            self.set_flash("已略過（沒有辨識到文字）", 1.5)
+            self.set_flash(t("flash_no_text"), 1.5)
             return
         self.stage, self.stage_start = "llm", t1
         text, ok = llm_refine(raw, mode, self.cfg, ctx)
         t2 = time.time()
         text = apply_replacements(text, self.cfg)
         if mode == "edit" and not ok:
-            self.set_flash("⚠️ DGX 未回應，未修改選取的文字", 2)
+            self.set_flash(t("flash_edit_dgx_failed"), 2)
         else:
             self.last_text = text
             macos.paste(text)
             if ctx.get("send"):
                 macos.press_return()
-            self.set_flash(("✅ 已送出" if ctx.get("send") else "✅ 已貼上") if ok else "⚠️ DGX 未回應，已貼上原文",
+            self.set_flash((t("flash_sent") if ctx.get("send") else t("flash_pasted")) if ok else t("flash_dgx_fallback"),
                            0.8 if ok else 2)
         rid = self.history.add(audio, mode=mode, app=ctx.get("app", ""), bundle=ctx.get("bundle", ""),
                          title=ctx.get("title", ""), duration=len(audio) / SAMPLE_RATE, raw=raw, text=text,

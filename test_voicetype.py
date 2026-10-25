@@ -11,7 +11,15 @@ import numpy as np
 import pytest
 
 import core
+import i18n
 from history import History
+
+
+@pytest.fixture(autouse=True)
+def _reset_ui_lang():
+    i18n.set_lang("zh-TW")
+    yield
+    i18n.set_lang("zh-TW")
 
 
 
@@ -1505,3 +1513,159 @@ def test_input_devices_real_coreaudio():
     devs = macos.input_devices()
     assert devs and all(d["uid"] and d["name"] and len(d["transport"]) in (0, 4) for d in devs)
     assert sum(d["default"] for d in devs) <= 1
+
+
+def test_resolve_lang():
+    # 6 種語言映射
+    assert core.resolve_lang("auto", "zh-Hans-CN") == "zh-TW"
+    assert core.resolve_lang("auto", "zh-Hant-TW") == "zh-TW"
+    assert core.resolve_lang("auto", "zh-TW") == "zh-TW"
+    assert core.resolve_lang("auto", "zh_CN") == "zh-TW"
+    assert core.resolve_lang("auto", "zh") == "zh-TW"
+    assert core.resolve_lang("auto", "en-US") == "en"
+    assert core.resolve_lang("auto", "EN_gb") == "en"
+    assert core.resolve_lang("auto", "en") == "en"
+    assert core.resolve_lang("auto", "ko-KR") == "ko"
+    assert core.resolve_lang("auto", "ko_kr") == "ko"
+    assert core.resolve_lang("auto", "ja-JP") == "ja"
+    assert core.resolve_lang("auto", "ja") == "ja"
+    assert core.resolve_lang("auto", "vi-VN") == "vi"
+    assert core.resolve_lang("auto", "vi") == "vi"
+    assert core.resolve_lang("auto", "th-TH") == "th"
+    assert core.resolve_lang("auto", "th") == "th"
+
+    # 不在支援清單或空值退回 en
+    assert core.resolve_lang("auto", "fr-FR") == "en"
+    assert core.resolve_lang("auto", "de-DE") == "en"
+    assert core.resolve_lang("auto", "") == "en"
+    assert core.resolve_lang("auto", None) == "en"
+
+    # 明確設定蓋過系統語言
+    assert core.resolve_lang("ja", "zh-TW") == "ja"
+    assert core.resolve_lang("ko", "en-US") == "ko"
+    assert core.resolve_lang("zh-TW", "ja") == "zh-TW"
+    assert core.resolve_lang("vi", "th-TH") == "vi"
+    assert core.resolve_lang("th", "en") == "th"
+    assert core.resolve_lang("en", "zh-TW") == "en"
+
+    # 未知設定等同 auto
+    assert core.resolve_lang("invalid", "ja_JP") == "ja"
+    assert core.resolve_lang(None, "ko-KR") == "ko"
+
+
+def test_i18n_keys_and_fallbacks():
+    # 所有語言鍵集合完全相同
+    base = set(i18n.STRINGS["zh-TW"].keys())
+    assert len(core.UI_LANGS) == 6
+    for code, _ in core.UI_LANGS:
+        assert set(i18n.STRINGS[code].keys()) == base
+
+    # 參數格式化正常運作
+    i18n.set_lang("zh-TW")
+    assert i18n.t("menu_seconds", s=10) == "10 秒"
+    i18n.set_lang("en")
+    assert i18n.t("menu_seconds", s=10) == "10s"
+    i18n.set_lang("ja")
+    assert i18n.t("menu_seconds", s=10) == "10 秒"
+
+    # 當前語言缺 key 退回 en
+    orig_val = i18n.STRINGS["ja"].pop("hud_btn_copy")
+    try:
+        i18n.set_lang("ja")
+        assert i18n.t("hud_btn_copy") == i18n.STRINGS["en"]["hud_btn_copy"]
+    finally:
+        i18n.STRINGS["ja"]["hud_btn_copy"] = orig_val
+
+    # 連 en 都沒有則退回 key 本身
+    assert i18n.t("non_existent_key_xyz") == "non_existent_key_xyz"
+
+
+def test_api_ui_lang(tmp_path):
+    from window import Api
+    cfg = cfg_with()
+    changed = []
+    system = type("Sys", (), {"config_changed": lambda self: changed.append(1)})()
+    api = Api(History(tmp_path), lambda: cfg, config_path=tmp_path / "c.json", system=system)
+
+    # 讀取預設
+    info = api.call("ui_lang", [])["result"]
+    assert info["setting"] == "auto"
+    assert info["lang"] == "zh-TW"
+    assert len(info["options"]) == 7  # auto + 6 codes
+    assert info["options"][0]["id"] == "auto"
+    assert info["options"][1]["id"] == "zh-TW"
+
+    # 切換到 en
+    res = api.call("ui_lang_set", ["en"])["result"]
+    assert res["setting"] == "en"
+    assert res["lang"] == "en"
+    assert i18n.get_lang() == "en"
+    assert cfg["ui_lang"] == "en"
+    assert json.loads((tmp_path / "c.json").read_text())["ui_lang"] == "en"
+    assert changed == [1]
+
+    # 切換到 ja
+    res = api.call("ui_lang_set", ["ja"])["result"]
+    assert res["setting"] == "ja"
+    assert res["lang"] == "ja"
+    assert i18n.get_lang() == "ja"
+    assert changed == [1, 1]
+
+    # 無效語言拋出錯誤
+    err = api.call("ui_lang_set", ["es"])
+    assert err["ok"] is False
+    assert "es" in err["error"]
+    assert i18n.get_lang() == "ja"  # 狀態未變
+
+
+def test_macos_system_language():
+    import macos
+    lang = macos.system_language()
+    assert isinstance(lang, str)
+
+
+def test_app_ui_lang_load_cfg(tmp_path, monkeypatch):
+    import voicetype
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps({"ui_lang": "ko"}))
+    monkeypatch.setattr(core, "CONFIG_PATH", p)
+    a = object.__new__(voicetype.App)
+    a.llm_store = llm_store(tmp_path)
+    cfg = a.load_cfg()
+    assert cfg["ui_lang"] == "ko"
+    assert i18n.get_lang() == "ko"
+
+
+def test_ui_i18n_keys_and_html():
+    import re
+    ui_dir = Path(__file__).parent / "ui"
+    js_text = (ui_dir / "i18n.js").read_text(encoding="utf-8")
+    m = re.search(r"const I18N = (\{.*?\});\n\nfunction", js_text, re.S)
+    assert m, "I18N object not found in ui/i18n.js"
+    i18n_dict = json.loads(m.group(1))
+
+    expected_langs = {"zh-TW", "en", "ko", "ja", "vi", "th"}
+    assert set(i18n_dict.keys()) == expected_langs
+
+    zh_keys = set(i18n_dict["zh-TW"].keys())
+    assert len(zh_keys) > 100
+    for lang in expected_langs:
+        assert set(i18n_dict[lang].keys()) == zh_keys
+
+    # Check html data-i18n* keys
+    html_text = (ui_dir / "index.html").read_text(encoding="utf-8")
+    keys_in_html = set(re.findall(r"data-i18n(?:-placeholder|-title|-aria-label)?=[\"\']([a-zA-Z0-9_]+)[\"\']", html_text))
+    assert keys_in_html, "No data-i18n attributes found in index.html"
+    missing = keys_in_html - zh_keys
+    assert not missing, f"Missing keys in dictionary: {missing}"
+
+    # Check that no CJK characters remain in index.html outside comments (allowing native language names)
+    text_no_html_comments = re.sub(r"<!--.*?-->", "", html_text, flags=re.S)
+    text_no_comments = re.sub(r"/\*.*?\*/", "", text_no_html_comments, flags=re.S)
+    text_no_comments = re.sub(r"//.*", "", text_no_comments)
+    cleaned = text_no_comments
+    for _, native in core.UI_LANGS:
+        cleaned = cleaned.replace(native, "")
+    cjk_chars = re.findall(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", cleaned)
+    assert not cjk_chars, f"Found CJK characters outside comments: {cjk_chars[:20]}"
+

@@ -46,6 +46,8 @@ DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=fals
 
 設定：`DEFAULTS` 與 `config.json` 一層淺合併，`load_config` 會把新欄位寫回舊設定檔。新增設定只需加在 `DEFAULTS`。
 
+多語系（zh-TW／en／ko／ja／vi／th）：使用者看得到的字串一律走 `t()`，新增字串要同時加到**所有語系**，否則測試會失敗。Python 端在 `i18n.py`（選單列、通知、`hud`、`Api` 的錯誤訊息），管理介面在 `ui/i18n.js`（靜態文字用 `data-i18n`／`data-i18n-placeholder`／`data-i18n-title`，動態文字用 `t()`）；`ui/index.html` 不可出現中日韓文字（註解除外，有測試檢查）。LLM prompt、日誌、註解不翻譯。語系由 `core.resolve_lang(cfg["ui_lang"], macos.system_language())` 決定，`App.load_cfg`／`set_cfg` 與 `Api.ui_lang_set` 呼叫 `i18n.set_lang`；`i18n` 的目前語系是全域狀態，跟著 `t()` 在任何執行緒讀取。`MODE_NAMES` 等對照表是 `i18n.Labels`，取值時才翻譯，不要在 import 時把翻譯結果存成常數。測試有 autouse fixture 固定成 zh-TW。
+
 **改 `DEFAULTS["prompts"]` 時**：先把改之前每個 prompt 的 sha1 前 12 碼加進 `core.OLD_PROMPTS`。設定檔存的是完整 prompt，會蓋過預設；`load_config` 只會把 hash 在 `OLD_PROMPTS` 裡（使用者沒改過的舊版預設）的換成新版。漏加的話新 prompt 到不了使用者手上（第二版的自我修正就這樣漏了一陣子）。
 
 翻譯浮動視窗 `TranslatePanel._render`：先設定視窗大小，再擺子元件；反過來 autoresizing 會把元件再位移一次。拖移與邊緣縮放都在 `Background.mouseDown_`（邊緣 6px 縮放、其他地方 `performWindowDragWithEvent_`），不要改回 `movableByWindowBackground`，否則邊緣收不到滑鼠事件。

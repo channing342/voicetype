@@ -9,6 +9,8 @@ from AppKit import (NSAppearance, NSAttributedString, NSBackingStoreBuffered, NS
                     NSTextView, NSView, NSWorkspace)
 from PyObjCTools import AppHelper
 
+from i18n import t
+
 SIZES = {"classic": (260, 84), "mini": (150, 34), "mini_text": (210, 34)}
 BARS = {"classic": 36, "mini": 14}
 BAR_W, BAR_GAP = 3, 3
@@ -267,24 +269,29 @@ class TranslatePanel:
         self.actions = Actions.alloc().init()
         self.actions.owner = self
         self.buttons = {}
-        for key, title in (("copy", "複製"), ("replace", "取代選取"), ("retry", "重試")):
-            b = NSButton.buttonWithTitle_target_action_(title, self.actions, f"{key}:")
+        for key, title_key in (("copy", "hud_btn_copy"), ("replace", "hud_btn_replace"), ("retry", "hud_btn_retry")):
+            b = NSButton.buttonWithTitle_target_action_(t(title_key), self.actions, f"{key}:")
             b.setBezelStyle_(10)  # smallSquare：方角，避免膠囊形按鈕
             b.setAutoresizingMask_(STICK_BOTTOM)
             self.buttons[key] = b
         for v in (self.head, self.scroll, *self.buttons.values()):
             self.view.addSubview_(v)
 
+    def update_i18n(self):
+        for key, title_key in (("copy", "hud_btn_copy"), ("replace", "hud_btn_replace"), ("retry", "hud_btn_retry")):
+            if key in self.buttons:
+                self.buttons[key].setTitle_(t(title_key))
+
     # ---- 狀態 ----
     def show_loading(self, source, anchor):
         self.source, self.text = source, ""
-        self._render("loading", "翻譯中…", first_line(source), anchor, dim=True)
+        self._render("loading", t("hud_translating"), first_line(source), anchor, dim=True)
 
     def show_result(self, text, truncated, label=""):
         """label：標題列文字（例如「中文 → 英文」），也是拖移視窗的把手。"""
         if self.shown:  # 等 DGX 時使用者已經關掉就不再跳出來
             self.text = text
-            self._render("result", label + ("（原文太長，只翻譯了前面的部分）" if truncated else ""), text, None)
+            self._render("result", label + (t("hud_truncated") if truncated else ""), text, None)
 
     def show_error(self, message):
         if self.shown:
@@ -314,8 +321,8 @@ class TranslatePanel:
 
     def do_copy(self):
         self.on_copy(self.selected_or_all())
-        self.buttons["copy"].setTitle_("已複製")
-        AppHelper.callLater(1.2, lambda: self.buttons["copy"].setTitle_("複製"))
+        self.buttons["copy"].setTitle_(t("hud_btn_copied"))
+        AppHelper.callLater(1.2, lambda: self.buttons["copy"].setTitle_(t("hud_btn_copy")))
 
     def do_replace(self):
         text = self.text

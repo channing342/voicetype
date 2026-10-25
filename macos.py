@@ -5,6 +5,7 @@ import time
 
 import objc
 from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSWorkspace
+from Foundation import NSLocale
 import ApplicationServices as AX
 import Quartz
 
@@ -236,3 +237,11 @@ def request_permissions():
 
 def open_privacy(key):
     subprocess.run(["open", f"x-apple.systempreferences:com.apple.preference.security?{PRIVACY_PANES[key]}"])
+
+
+def system_language():
+    try:
+        langs = NSLocale.preferredLanguages()
+        return str(langs[0]) if langs else ""
+    except Exception:
+        return ""

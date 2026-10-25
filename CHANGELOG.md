@@ -2,6 +2,18 @@
 
 版本號是「主.次」兩段數字（寫在 `pyproject.toml`）：每次發布次版號 +1；設定檔不相容或大改版時主版號 +1、次版號歸 0。v1.0 之前的紀錄以日期標示。
 
+## v1.1（2026-10-25）：介面多語系
+
+### 新增
+- **介面多語系**：繁體中文、English、한국어、日本語、Tiếng Việt、ไทย。範圍包含管理介面（`ui/index.html` 的文字、按鈕、提示、placeholder、title、錯誤訊息）、選單列項目與通知、錄音／翻譯浮動視窗，以及 `window.Api` 回傳給頁面顯示的訊息。LLM prompt、日誌與程式註解維持中文。
+- **預設跟隨系統語言**：讀 `NSLocale.preferredLanguages()` 的第一個（`macos.system_language`），由 `core.resolve_lang` 對應：任何 `zh-*` → 繁體中文；`en`／`ko`／`ja`／`vi`／`th` 各自對應；其他語言或讀不到 → 英文。
+- **設定頁「介面語言」選單**：「跟隨系統」加六種語言，存在 `config.json` 的新欄位 `ui_lang`（預設 `auto`）。切換後管理介面不用重開就換語言，選單列在主執行緒重建，翻譯浮動視窗的按鈕同步更新。
+
+### 實作
+- Python 端字串集中在 `i18n.py`（`t(key, **kw)`，缺字時退回英文、再退回 key）；`MODE_NAMES`、`MIC_TAGS`、`TRANSLATE_LABELS`、`STAGES` 改成取值時才翻譯的 `i18n.Labels`。
+- 管理介面字串在 `ui/i18n.js`（`I18N` 字典、`t()`、`applyI18n()` 填入 `data-i18n*` 屬性）；`index.html` 本身不再有中文字串。
+- 測試檢查每個語系的 key 與 zh-TW 一致、頁面用到的 key 都存在、`index.html` 沒有殘留的中日韓文字。
+
 ## v1.0（2026-10-24）：參考 MyParrot：麥克風、長錄音切塊、聽錯的詞；加入版本號
 
 ### 版本號

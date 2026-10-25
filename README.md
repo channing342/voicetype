@@ -28,6 +28,7 @@
 | 不污染剪貼簿 | 貼上後還原原本的剪貼簿，Raycast、Paste 這類剪貼簿管理器也不會記錄 |
 | DGX 失敗時 | 超過逾時時間（預設 10 秒）就改貼辨識原文；編輯模式則不修改原本的文字。在歷史紀錄裡重新處理失敗時，紀錄也不會被改動 |
 | 重新貼上 | 選單列 →「重新貼上上一次結果」：把最近一次貼上的文字再貼一次到目前的 App |
+| 介面語言 | 繁體中文、English、한국어、日本語、Tiếng Việt、ไทย。預設跟隨 macOS 系統語言（任何中文 → 繁體中文；英、韓、日、越、泰各自對應；其他語言 → 英文）。管理介面「設定」→「介面語言」可以固定成某一種，管理介面立即換語言，選單列與浮動視窗同步更新。辨識與 DGX 整理的輸出語言不受影響 |
 | 暫停 | 選單列 →「暫停」：暫時停用所有快捷鍵（按鍵照常傳給其他 App），圖示變成 ⏸，再點一次恢復 |
 
 所有快捷鍵都在管理介面首頁重新錄製。
@@ -56,6 +57,7 @@ flowchart LR
 | `history.py` | 歷史紀錄（SQLite + WAV），過期自動刪除 |
 | `llmstore.py` | 多組 LLM 設定（SQLite，header 值以 Fernet 加密） |
 | `hud.py` | 錄音浮動視窗（原生 NSView 繪製） |
+| `i18n.py` + `ui/i18n.js` | 介面多語系字串：Python 端（選單列、通知、浮動視窗、Api 訊息）與管理介面各一份字典 |
 | `window.py` + `ui/index.html` | 管理介面：首頁、歷史紀錄、詞彙、設定（WKWebView 搭配 JS bridge） |
 | `install.sh` | 產生並載入 LaunchAgent |
 
@@ -115,11 +117,12 @@ uv run python voicetype.py   # 印出「就緒」後即可使用
 | `translate_max_chars` | 4000 | 選取翻譯的長度上限，超過就截斷 |
 | `history_days` | 30 | 歷史紀錄保留天數（1–3650），管理介面「設定」→「歷史紀錄」可以改；啟動時和之後每小時刪除過期紀錄，改短後馬上刪 |
 | `hud_style` | `classic` | `classic`／`mini`／`none` |
+| `ui_lang` | `auto` | 介面語言：`auto`（跟隨系統）／`zh-TW`／`en`／`ko`／`ja`／`vi`／`th`；建議從管理介面「設定」→「介面語言」切換 |
 | `theme` | `system` | `system`／`light`／`dark`，管理介面與翻譯浮動視窗共用；在管理介面側欄切換 |
 | `vocabulary`、`replacements` | | 建議從詞彙管理視窗維護 |
 | `app_styles` | 郵件、聊天、終端機／IDE | 依 App 套用的語氣規則。`apps` 填 bundle id，可以用 `*` 萬用字元；`title` 填視窗標題的關鍵字 |
 | `context` | 兩項都是 `false` | `clipboard`、`input_field` 打開後，會把剪貼簿或輸入框的內容也交給 DGX |
-| `prompts` | | 清理、整理、編輯三種模式的 system prompt |
+| `prompts` | | 清理、整理、編輯三種模式的 system prompt（固定中文，不隨介面語言改變） |
 | `min_seconds`、`max_seconds`、`silence_rms` | 0.5／300／0.003 | 錄音太短、太長或幾乎沒聲音時的判斷門檻；`silence_rms` 也是去除靜音的最低門檻 |
 | `audio_cleanup` | true | 辨識前去除靜音與音量正規化；歷史紀錄存的是處理後的錄音 |
 | `mic` | `auto` | `auto`（避開藍牙、iPhone、虛擬裝置）／`system`（跟系統預設）／指定裝置的 UID |

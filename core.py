@@ -14,6 +14,8 @@ from pathlib import Path
 
 import numpy as np
 
+from i18n import Labels, t
+
 # 版本號只寫在 pyproject.toml，選單列、管理介面、啟動訊息都從這裡讀
 VERSION = tomllib.loads((Path(__file__).parent / "pyproject.toml").read_text())["project"]["version"]
 CONFIG_PATH = Path.home() / ".config/voicetype/config.json"
@@ -21,8 +23,34 @@ SAMPLE_RATE = 16000
 KEY_ESC, KEY_C, KEY_V, KEY_RETURN = 53, 8, 9, 36
 MOD_FLAGS = {"ctrl": 1 << 18, "alt": 1 << 19, "shift": 1 << 17, "cmd": 1 << 20}
 MOD_SYMBOLS = {"ctrl": "⌃", "alt": "⌥", "shift": "⇧", "cmd": "⌘"}
-MODE_NAMES = {"clean": "清理", "organize": "整理", "english": "說中文出英文", "edit": "編輯",
-              "translate": "翻譯選取", "window": "管理介面"}
+
+UI_LANGS = [
+    ("zh-TW", "繁體中文"),
+    ("en", "English"),
+    ("ko", "한국어"),
+    ("ja", "日本語"),
+    ("vi", "Tiếng Việt"),
+    ("th", "ไทย"),
+]
+VALID_LANG_CODES = {code for code, _ in UI_LANGS}
+
+
+def resolve_lang(setting, system_lang):
+    if setting in VALID_LANG_CODES:
+        return setting
+    if not system_lang:
+        return "en"
+    tag = str(system_lang).strip().lower().replace("_", "-")
+    primary = tag.split("-")[0]
+    if primary == "zh":
+        return "zh-TW"
+    if primary in ("en", "ko", "ja", "vi", "th"):
+        return primary
+    return "en"
+
+
+MODE_NAMES = Labels({"clean": "mode_clean", "organize": "mode_organize", "english": "mode_english", "edit": "mode_edit",
+                    "translate": "mode_translate", "window": "mode_window"})  # 取值時依目前語系翻譯
 RECORD_MODES = ("clean", "organize", "english", "edit")  # 會錄音的模式；translate、window 按一下就執行
 
 SELF_CORRECTION = "說話者自我修正時（例如「三點，不對，四點」「改成…」「我是說…」），即使改口隔了好幾句才出現，也只保留最後的決定。"
@@ -39,6 +67,7 @@ DEFAULT_LLM = {"id": "dgx", "name": "DGX", "url": "http://dgx.ansible.news:8888/
 RUNTIME_KEYS = ("llm",)  # 只在記憶體、不寫進設定檔的欄位
 
 DEFAULTS = {
+    "ui_lang": "auto",
     "hotkeys": {
         "clean": {"keycode": 43, "mods": ["cmd"], "label": "⌘,"},
         "organize": {"keycode": 47, "mods": ["cmd"], "label": "⌘."},
@@ -117,7 +146,8 @@ ASR_CHOICES = [
 ]
 
 
-def load_config(path=CONFIG_PATH):
+def load_config(path=None):
+    path = CONFIG_PATH if path is None else path
     cfg = json.loads(json.dumps(DEFAULTS))
     if path.exists():
         user = json.loads(path.read_text())
@@ -132,7 +162,8 @@ def load_config(path=CONFIG_PATH):
     return cfg
 
 
-def save_config(cfg, path=CONFIG_PATH):
+def save_config(cfg, path=None):
+    path = CONFIG_PATH if path is None else path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({k: v for k, v in cfg.items() if k not in RUNTIME_KEYS}, ensure_ascii=False, indent=2))
 
@@ -180,13 +211,13 @@ def parse_capture(hotkeys, mode, keycode, flags, char):
         return None, ""
     mods = event_mods(flags)
     if not mods:
-        return None, "快捷鍵需包含 ⌘ ⌥ ⌃ ⇧ 其中之一"
+        return None, t("hk_need_mod")
     other = match_hotkey({k: v for k, v in hotkeys.items() if k != mode}, keycode, flags)
     if other:
-        return None, f"與{MODE_NAMES[other]}快捷鍵 {hotkeys[other]['label']} 重複"
+        return None, t("hk_duplicate", other=MODE_NAMES[other], label=hotkeys[other]["label"])
     label = "".join(MOD_SYMBOLS[m] for m in ("ctrl", "alt", "shift", "cmd") if m in mods) + \
         ((char or "").upper().strip() or f"key{keycode}")
-    return {"keycode": keycode, "mods": mods, "label": label}, f"{MODE_NAMES[mode]}快捷鍵：{label}"
+    return {"keycode": keycode, "mods": mods, "label": label}, t("hk_recorded", mode=MODE_NAMES[mode], label=label)
 
 
 def rms(x):
@@ -388,7 +419,7 @@ def translate_kind(text):
     return "zh"
 
 
-TRANSLATE_LABELS = {"en": "中文 → 英文", "zh": "翻成中文", "dictionary": "字典"}
+TRANSLATE_LABELS = Labels({"en": "tr_label_en", "zh": "tr_label_zh", "dictionary": "tr_label_dict"})
 
 
 def translate(text, cfg):
@@ -495,6 +526,14 @@ def find_misheard(text, cfg, raw=""):
     return result
 
 
+STYLE_NAME_KEYS = {"郵件": "style_mail", "聊天": "style_chat", "終端機／IDE": "style_terminal"}
+ASR_NOTE_KEYS = {
+    "mlx-community/whisper-large-v3-turbo": "asr_note_whisper_turbo",
+    "mlx-community/Qwen3-ASR-0.6B-8bit": "asr_note_qwen_06b",
+    "mlx-community/Qwen3-ASR-1.7B-8bit": "asr_note_qwen_17b",
+}
+
+
 def pick_input(devices, setting, name=""):
     """選麥克風。devices：[{uid, name, transport, default}]（只含有輸入的裝置）；name：指定裝置的名稱（提示用）。
     回傳 (裝置或 None＝交給系統預設, 提示訊息)。"""
@@ -506,14 +545,15 @@ def pick_input(devices, setting, name=""):
         chosen = next((d for d in devices if d["uid"] == setting), None)
         if chosen:
             return chosen, ""
-        notice = f"找不到{name or '指定的麥克風'}"
+        target_name = name or t("mic_default_specified")
+        notice = t("mic_not_found", name=target_name)
     if default and default["transport"] not in AVOID_TRANSPORTS:
-        return (default, f"{notice}，改用{default['name']}") if notice else (None, "")
+        return (default, t("mic_fallback", notice=notice, name=default['name'])) if notice else (None, "")
     builtin = next((d for d in devices if d["transport"] == "bltn"), None)
     fallback = builtin or next((d for d in devices if d["transport"] not in AVOID_TRANSPORTS), None)
     if fallback is None:
         return None, notice
-    return fallback, (f"{notice}，改用{fallback['name']}" if notice else "")
+    return fallback, (t("mic_fallback", notice=notice, name=fallback['name']) if notice else "")
 
 
 def sd_index(devices, chosen, sd_devices):
@@ -530,17 +570,19 @@ def mic_name(devices, uid):
     return next((d["name"] for d in devices if d["uid"] == uid), "")
 
 
-MIC_TAGS = {"blue": "藍牙", "blea": "藍牙", "ccwl": "iPhone", "ccwd": "iPhone", "virt": "虛擬", "grup": "虛擬",
-            "fgrp": "虛擬", "bltn": "內建", "usb ": "USB"}
+MIC_TAGS = Labels({"blue": "mic_tag_bluetooth", "blea": "mic_tag_bluetooth", "ccwl": "mic_tag_iphone",
+                  "ccwd": "mic_tag_iphone", "virt": "mic_tag_virtual", "grup": "mic_tag_virtual",
+                  "fgrp": "mic_tag_virtual", "bltn": "mic_tag_builtin", "usb ": "mic_tag_usb"})
 
 
 def mic_options(devices, current, name=""):
     """管理介面與選單列的麥克風選項：[{id, name}]。指定的裝置沒接上時也列出來（標示未連接）。"""
-    opts = [{"id": "auto", "name": "自動（避開藍牙、iPhone、虛擬裝置）"}, {"id": "system", "name": "跟隨系統預設"}]
-    opts += [{"id": d["uid"], "name": d["name"] + (f"（{MIC_TAGS[d['transport']]}）" if d["transport"] in MIC_TAGS else "")}
+    opts = [{"id": "auto", "name": t("mic_auto")}, {"id": "system", "name": t("mic_system")}]
+    opts += [{"id": d["uid"], "name": (t("mic_tagged", name=d["name"], tag=MIC_TAGS[d["transport"]]) if d["transport"] in MIC_TAGS else d["name"])}
              for d in devices]
     if current not in {o["id"] for o in opts}:
-        opts.append({"id": current, "name": f"{name or '指定的麥克風'}（未連接）"})
+        target_name = name or t("mic_default_specified")
+        opts.append({"id": current, "name": t("mic_disconnected", name=target_name)})
     return opts
 
 

@@ -13,8 +13,11 @@ from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
 import time
 
 import macos
-from core import (VERSION, ASR_CHOICES, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES, apply_replacements, chat, find_misheard,
-                  hf_cached, llm_refine, match_hotkey, mic_name, mic_options, save_config, suggest_corrections)
+from core import (VERSION, ASR_CHOICES, ASR_NOTE_KEYS, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES,
+                  STYLE_NAME_KEYS, UI_LANGS, apply_replacements, chat, find_misheard,
+                  hf_cached, llm_refine, match_hotkey, mic_name, mic_options, resolve_lang,
+                  save_config, suggest_corrections)
+from i18n import get_lang, set_lang, t
 
 UI_DIR = Path(__file__).parent / "ui"
 TYPING_CPM = 40  # 估算省下時間用：一般人每分鐘約打 40 個中文字
@@ -29,7 +32,7 @@ class Api:
                "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart",
                "llm", "llm_save", "llm_use", "llm_delete", "llm_test", "theme_set", "history_days_set",
                "mics", "mic_set", "save_text", "corrections", "correction_apply", "correction_ignore",
-               "corrections_add_all", "record_suggest", "record_apply"}
+               "corrections_add_all", "record_suggest", "record_apply", "ui_lang", "ui_lang_set"}
 
     def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None,
                  system=None, llm_store=None):
@@ -64,12 +67,12 @@ class Api:
         """DGX 失敗時不覆蓋原本的結果（跟錄音當下的編輯模式一樣，失敗就不改）。"""
         r = self.h.get(int(rid))
         if mode == "edit" and not r.get("selection"):
-            raise ValueError("這筆紀錄沒有選取的文字，不能用編輯模式重新處理")
+            raise ValueError(t("err_edit_no_selection"))
         cfg = self.get_cfg()
         ctx = {k: r[k] for k in ("app", "bundle", "title", "selection") if r.get(k)}
         text, ok = llm_refine(r["raw"], mode, cfg, ctx)
         if not ok:
-            raise RuntimeError("DGX 未回應，紀錄沒有修改")
+            raise RuntimeError(t("err_dgx_no_response"))
         self.h.update(int(rid), text=apply_replacements(text, cfg), mode=mode, ok=1, ai_text=None, edited=0)
         return self.h.get(int(rid))
 
@@ -89,7 +92,7 @@ class Api:
     def record_apply(self, rid, original, suggestion, add_rule=False):
         r = self.h.get(int(rid))
         if original not in r["text"]:
-            raise ValueError("文字已經改過，找不到原本的片段")
+            raise ValueError(t("err_record_text_changed"))
         if add_rule:
             self.repl_set(original, suggestion)  # 1 個字的規則會在這裡擋下，紀錄也不會被改
         return self.save_text(rid, r["text"].replace(original, suggestion, 1))
@@ -127,7 +130,7 @@ class Api:
 
     def mic_set(self, value):
         if not isinstance(value, str) or not value:
-            raise ValueError("未知的麥克風")
+            raise ValueError(t("err_unknown_mic"))
         cfg = self.get_cfg()
         name = mic_name(macos.input_devices(), value) or (cfg["mic_name"] if value == cfg["mic"] else "")
         cfg["mic"], cfg["mic_name"] = value, name
@@ -164,7 +167,7 @@ class Api:
         src = src.strip()
         # 手動新增時，頁面收到這個錯誤會讓使用者再按一次確認（force=True）；聽錯的詞建議則一律不允許 1 個字
         if len(src) == 1 and not force:
-            raise ValueError("只有 1 個字的替換規則會換掉所有文字裡的這個字")
+            raise ValueError(t("err_single_char_replacement"))
         if src:
             self.get_cfg()["replacements"][src] = dst.strip()
             self._save()
@@ -182,7 +185,7 @@ class Api:
     def history_days_set(self, days):
         days = int(float(days))
         if not 1 <= days <= 3650:
-            raise ValueError("保留天數要在 1 到 3650 之間")
+            raise ValueError(t("err_history_days_range"))
         self.get_cfg()["history_days"] = days
         self._save()
         if self.system:
@@ -191,15 +194,16 @@ class Api:
 
     def asr(self):
         current = self.get_cfg()["asr_model"]
-        choices = [{**c, "downloaded": hf_cached(c["id"])} for c in ASR_CHOICES]
+        choices = [{**c, "note": t(ASR_NOTE_KEYS[c["id"]]) if c["id"] in ASR_NOTE_KEYS else c["note"],
+                    "downloaded": hf_cached(c["id"])} for c in ASR_CHOICES]
         if current not in {c["id"] for c in ASR_CHOICES}:
-            choices.append({"id": current, "name": current, "size": "", "note": "設定檔自訂的模型",
+            choices.append({"id": current, "name": current, "size": "", "note": t("asr_custom_model"),
                             "downloaded": hf_cached(current)})
         return {"current": current, "choices": choices, **self.asr_status()}
 
     def asr_set(self, repo):
         if repo not in {c["id"] for c in self.asr()["choices"]}:
-            raise ValueError(f"未知的模型 {repo}")
+            raise ValueError(t("err_unknown_model", repo=repo))
         if repo != self.get_cfg()["asr_model"]:
             self.get_cfg()["asr_model"] = repo
             self._save()
@@ -216,26 +220,26 @@ class Api:
         name, url, model = (str(form.get(k) or "").strip() for k in ("name", "url", "model"))
         timeout = float(form.get("timeout") or 0)
         if check_name and not name:
-            raise ValueError("請填設定名稱")
+            raise ValueError(t("err_llm_name_empty"))
         if check_name and any(p["name"] == name and p["id"] != form.get("id") for p in self.llm_store.list()):
-            raise ValueError(f"已經有叫「{name}」的設定")
+            raise ValueError(t("err_llm_name_duplicate", name=name))
         if not url.startswith(("http://", "https://")):
-            raise ValueError("網址要以 http:// 或 https:// 開頭")
+            raise ValueError(t("err_llm_url_protocol"))
         if not model:
-            raise ValueError("請填模型名稱")
+            raise ValueError(t("err_llm_model_empty"))
         if not 1 <= timeout <= 120:
-            raise ValueError("逾時要在 1 到 120 秒之間")
+            raise ValueError(t("err_llm_timeout_range"))
         hdrs = {}
         for hname, value in form.get("headers") or []:  # 兩格都空的列略過
             hname, value = hname.strip(), value.strip()
             if not hname and not value:
                 continue
             if not HEADER_NAME.fullmatch(hname):
-                raise ValueError(f"Header 名稱不合法：{hname or '（空白）'}")
+                raise ValueError(t("err_llm_header_invalid", name=hname or t("empty_value")))
             if hname.lower() in {k.lower() for k in hdrs}:
-                raise ValueError(f"Header 重複：{hname}")
+                raise ValueError(t("err_llm_header_duplicate", name=hname))
             if any(c in value for c in "\r\n"):
-                raise ValueError(f"Header 值不能換行：{hname}")
+                raise ValueError(t("err_llm_header_newline", name=hname))
             hdrs[hname] = value
         return {"id": form.get("id") or None, "name": name, "url": url, "model": model,
                 "timeout": int(timeout) if timeout.is_integer() else timeout, "headers": hdrs}
@@ -243,7 +247,7 @@ class Api:
     def _llm_find(self, pid):
         p = self.llm_store.get(pid)
         if not p:
-            raise ValueError("找不到這組設定，可能已經刪除")
+            raise ValueError(t("err_llm_not_found"))
         return p
 
     def _llm_changed(self):
@@ -268,7 +272,7 @@ class Api:
     def llm_delete(self, pid):
         p = self._llm_find(pid)
         if p["id"] == self.llm_store.active()["id"]:
-            raise ValueError("使用中的設定不能刪除，先切換到其他組")
+            raise ValueError(t("err_llm_cannot_delete_active"))
         self.llm_store.delete(p["id"])
         self._llm_changed()
         return self.llm()
@@ -284,8 +288,9 @@ class Api:
         cfg, st = self.get_cfg(), self.h.stats()
         cpm = st["chars"] / (st["seconds"] / 60) if st["seconds"] else 0
         cur = next((c["name"] for c in ASR_CHOICES if c["id"] == cfg["asr_model"]), cfg["asr_model"])
-        return {"hotkeys": cfg["hotkeys"], "defaults": DEFAULTS["hotkeys"], "modes": MODE_NAMES,
-                "styles": [{"name": r["name"], "style": r["style"]} for r in cfg["app_styles"]],
+        return {"hotkeys": cfg["hotkeys"], "defaults": DEFAULTS["hotkeys"], "modes": dict(MODE_NAMES),
+                "styles": [{"name": t(STYLE_NAME_KEYS[r["name"]]) if r["name"] in STYLE_NAME_KEYS else r["name"],
+                            "style": r["style"]} for r in cfg["app_styles"]],
                 "stats": {**st, "cpm": round(cpm), "saved": max(0, st["chars"] / TYPING_CPM * 60 - st["seconds"]),
                           "ok_rate": round(st["ok"] / st["count"] * 100) if st["count"] else None},
                 "asr": {"name": cur, **self.asr_status()}, "history_days": cfg["history_days"], "theme": cfg["theme"], "version": VERSION,
@@ -293,10 +298,27 @@ class Api:
 
     def theme_set(self, theme):
         if theme not in ("system", "light", "dark"):
-            raise ValueError(f"未知的主題 {theme}")
+            raise ValueError(t("err_unknown_theme", theme=theme))
         self.get_cfg()["theme"] = theme
         self._save()
         return theme
+
+    def ui_lang(self):
+        cfg = self.get_cfg()
+        options = [{"id": "auto", "name": t("lang_auto")}] + [{"id": code, "name": native} for code, native in UI_LANGS]
+        return {"setting": cfg.get("ui_lang", "auto"), "lang": get_lang(), "options": options}
+
+    def ui_lang_set(self, value):
+        valid = {"auto", *(code for code, _ in UI_LANGS)}
+        if value not in valid:
+            raise ValueError(t("err_unknown_lang", lang=value))
+        cfg = self.get_cfg()
+        cfg["ui_lang"] = value
+        self._save()
+        set_lang(resolve_lang(value, macos.system_language()))
+        if self.system:
+            self.system.config_changed()
+        return self.ui_lang()
 
     def hotkey_capture(self, mode):
         self.system.capture(mode)
@@ -311,7 +333,7 @@ class Api:
         flags = sum(MOD_FLAGS[m] for m in hk["mods"])
         other = match_hotkey({k: v for k, v in hotkeys.items() if k != mode}, hk["keycode"], flags)
         if other:
-            raise ValueError(f"預設的 {hk['label']} 已被{MODE_NAMES[other]}使用")
+            raise ValueError(t("err_hotkey_used", label=hk['label'], mode=MODE_NAMES[other]))
         hotkeys[mode] = dict(hk)
         self._save()
         self.system.config_changed()
@@ -336,7 +358,7 @@ class Api:
         try:
             return {"ok": True, "result": getattr(self, method)(*args)}
         except Exception as e:
-            return {"ok": False, "error": repr(e)}
+            return {"ok": False, "error": str(e)}
 
 
 class Bridge(NSObject, protocols=[objc.protocolNamed("WKScriptMessageHandler")]):
