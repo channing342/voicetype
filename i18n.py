@@ -47,7 +47,7 @@ STRINGS = {
         "menu_record_mode": "開始／結束錄音：{mode}（{label}）",
         "menu_translate_sel": "翻譯選取的文字（{label}）",
         "menu_history": "歷史紀錄…",
-        "menu_vocab": "詞彙管理…",
+        "menu_vocab": "詞彙與記憶…",
         "menu_settings": "設定（辨識模型）…",
         "menu_paste_last": "重新貼上上一次結果",
         "menu_hotkeys": "快捷鍵…",
@@ -108,6 +108,8 @@ STRINGS = {
         "asr_note_whisper_turbo": "OpenAI，fp16。辨識快，詞彙透過 initial_prompt 提示；雜音或含糊語音偶爾會產生幻覺文字。",
         "asr_note_qwen_06b": "阿里通義。最省記憶體；詞彙以 hotwords 提示，輸出簡體會自動轉繁體。",
         "asr_note_qwen_17b": "阿里通義。中文準確度較高（少量真人錄音實測優於 Whisper），記憶體用量最大。",
+        "err_memory_not_found": "找不到這筆記憶",
+        "err_memory_import_invalid": "不是有效的記憶匯出檔"
     },
     "en": {
         "lang_auto": "Auto (System)",
@@ -151,7 +153,7 @@ STRINGS = {
         "menu_record_mode": "Start / Stop Recording: {mode} ({label})",
         "menu_translate_sel": "Translate Selected Text ({label})",
         "menu_history": "History…",
-        "menu_vocab": "Vocabulary…",
+        "menu_vocab": "Vocabulary & Memory…",
         "menu_settings": "Settings (Speech Model)…",
         "menu_paste_last": "Paste Last Result Again",
         "menu_hotkeys": "Shortcuts…",
@@ -212,6 +214,8 @@ STRINGS = {
         "asr_note_whisper_turbo": "OpenAI, fp16. Fast recognition; vocabulary hinted via initial_prompt. May hallucinate on noisy audio.",
         "asr_note_qwen_06b": "Alibaba Tongyi. Lowest memory; vocabulary hinted via hotwords, simplified output converted to traditional.",
         "asr_note_qwen_17b": "Alibaba Tongyi. Higher accuracy in Chinese; largest memory usage.",
+        "err_memory_not_found": "Memory entry not found",
+        "err_memory_import_invalid": "Not a valid memory export file"
     },
     "ko": {
         "lang_auto": "자동 (시스템 설정)",
@@ -255,7 +259,7 @@ STRINGS = {
         "menu_record_mode": "녹음 시작/중지: {mode} ({label})",
         "menu_translate_sel": "선택한 텍스트 번역 ({label})",
         "menu_history": "기록…",
-        "menu_vocab": "어휘 관리…",
+        "menu_vocab": "어휘와 기억…",
         "menu_settings": "설정 (인식 모델)…",
         "menu_paste_last": "마지막 결과 다시 붙여넣기",
         "menu_hotkeys": "단축키…",
@@ -316,6 +320,8 @@ STRINGS = {
         "asr_note_whisper_turbo": "OpenAI, fp16. 빠른 인식 속도; 어휘는 initial_prompt로 전달됩니다. 잡음 시 환각 가능성 있음.",
         "asr_note_qwen_06b": "Alibaba Tongyi. 메모리 절약; 어휘는 hotwords로 전달, 간체 출력은 번체로 자동 변환.",
         "asr_note_qwen_17b": "Alibaba Tongyi. 중국어 정확도 우수; 메모리 사용량 큼.",
+        "err_memory_not_found": "기억을 찾을 수 없습니다",
+        "err_memory_import_invalid": "올바른 기억 내보내기 파일이 아닙니다"
     },
     "ja": {
         "lang_auto": "自動（システム設定）",
@@ -359,7 +365,7 @@ STRINGS = {
         "menu_record_mode": "録音開始／停止：{mode}（{label}）",
         "menu_translate_sel": "選択したテキストを翻訳（{label}）",
         "menu_history": "履歴…",
-        "menu_vocab": "単語登録…",
+        "menu_vocab": "単語とメモリ…",
         "menu_settings": "設定（音声認識モデル）…",
         "menu_paste_last": "前回の結果を再ペースト",
         "menu_hotkeys": "ショートカット…",
@@ -420,6 +426,8 @@ STRINGS = {
         "asr_note_whisper_turbo": "OpenAI、fp16。高速認識。単語は initial_prompt で提示。ノイズにより幻覚が生じる場合があります。",
         "asr_note_qwen_06b": "阿里通義。省メモリ。単語は hotwords で提示、簡体字出力は自動的に繁体字に変換されます。",
         "asr_note_qwen_17b": "阿里通義。中国語の精度が高く、メモリ使用量が最も大きいです。",
+        "err_memory_not_found": "このメモリが見つかりません",
+        "err_memory_import_invalid": "有効なメモリの書き出しファイルではありません"
     },
     "vi": {
         "lang_auto": "Tự động (Theo hệ thống)",
@@ -463,7 +471,7 @@ STRINGS = {
         "menu_record_mode": "Bắt đầu / Dừng ghi âm: {mode} ({label})",
         "menu_translate_sel": "Dịch văn bản đã chọn ({label})",
         "menu_history": "Lịch sử…",
-        "menu_vocab": "Quản lý từ vựng…",
+        "menu_vocab": "Từ vựng & Bộ nhớ…",
         "menu_settings": "Cài đặt (Mô hình nhận dạng)…",
         "menu_paste_last": "Dán lại kết quả gần nhất",
         "menu_hotkeys": "Phím tắt…",
@@ -524,6 +532,8 @@ STRINGS = {
         "asr_note_whisper_turbo": "OpenAI, fp16. Nhận dạng nhanh; từ vựng được gợi ý qua initial_prompt. Có thể bị ảo giác với âm thanh ồn.",
         "asr_note_qwen_06b": "Alibaba Tongyi. Tiết kiệm bộ nhớ nhất; từ vựng gợi ý qua hotwords, chữ giản thể tự động chuyển sang phồn thể.",
         "asr_note_qwen_17b": "Alibaba Tongyi. Độ chính xác tiếng Trung cao hơn; tốn bộ nhớ nhất.",
+        "err_memory_not_found": "Không tìm thấy mục bộ nhớ này",
+        "err_memory_import_invalid": "Không phải tệp xuất bộ nhớ hợp lệ"
     },
     "th": {
         "lang_auto": "อัตโนมัติ (ตามระบบ)",
@@ -567,7 +577,7 @@ STRINGS = {
         "menu_record_mode": "เริ่ม / หยุดบันทึก: {mode} ({label})",
         "menu_translate_sel": "แปลข้อความที่เลือก ({label})",
         "menu_history": "ประวัติ…",
-        "menu_vocab": "คำศัพท์…",
+        "menu_vocab": "คำศัพท์และหน่วยความจำ…",
         "menu_settings": "ตั้งค่า (โมเดลการถอดเสียง)…",
         "menu_paste_last": "วางผลลัพธ์ล่าสุดอีกครั้ง",
         "menu_hotkeys": "ปุ่มลัด…",
@@ -628,6 +638,8 @@ STRINGS = {
         "asr_note_whisper_turbo": "OpenAI, fp16 ถอดเสียงเร็ว ส่งคำศัพท์ผ่าน initial_prompt เสียงรบกวนอาจทำให้เกิดข้อความหลอน",
         "asr_note_qwen_06b": "Alibaba Tongyi ประหยัดหน่วยความจำที่สุด ส่งคำศัพท์ผ่าน hotwords แปลงตัวย่อเป็นตัวเต็มอัตโนมัติ",
         "asr_note_qwen_17b": "Alibaba Tongyi ความแม่นยำภาษาจีนสูงกว่า ใช้หน่วยความจำมากที่สุด",
+        "err_memory_not_found": "ไม่พบรายการหน่วยความจำนี้",
+        "err_memory_import_invalid": "ไม่ใช่ไฟล์ส่งออกหน่วยความจำที่ถูกต้อง"
     },
 }
 

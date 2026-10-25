@@ -16,11 +16,12 @@ import macos
 from core import (VERSION, ASR_CHOICES, ASR_NOTE_KEYS, CONFIG_PATH, DEFAULTS, MOD_FLAGS, MODE_NAMES,
                   STYLE_NAME_KEYS, UI_LANGS, apply_replacements, chat, find_misheard,
                   hf_cached, llm_refine, match_hotkey, mic_name, mic_options, resolve_lang,
-                  save_config, suggest_corrections)
+                  save_config, snippet, suggest_corrections)
 from i18n import get_lang, set_lang, t
 
 UI_DIR = Path(__file__).parent / "ui"
 TYPING_CPM = 40  # 估算省下時間用：一般人每分鐘約打 40 個中文字
+PROPER_NOUN = re.compile(r"[A-Za-z][A-Za-z0-9.\-]*( [A-Za-z0-9][A-Za-z0-9.\-]*)*")  # 英文專有名詞：Redis、Direct Connect
 HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")  # RFC 9110 token
 
 
@@ -32,14 +33,17 @@ class Api:
                "hotkey_cancel", "hotkey_reset", "permissions_request", "open_privacy", "restart",
                "llm", "llm_save", "llm_use", "llm_delete", "llm_test", "theme_set", "history_days_set",
                "mics", "mic_set", "save_text", "corrections", "correction_apply", "correction_ignore",
-               "corrections_add_all", "record_suggest", "record_apply", "ui_lang", "ui_lang_set"}
+               "corrections_add_all", "record_suggest", "record_apply", "ui_lang", "ui_lang_set",
+               "memories", "memory_set", "memory_delete", "memory_export", "memory_import", "memory_enabled_set"}
 
     def __init__(self, history, get_cfg, config_path=CONFIG_PATH, copy=None, on_asr_change=None, asr_status=None,
-                 system=None, llm_store=None):
+                 system=None, llm_store=None, memory=None):
         """on_asr_change()：設定改了之後通知 App 到 worker 載入新模型；asr_status() → {"loading", "error"}。
         system：App 本身，提供快捷鍵錄製、權限、重新啟動（見 voicetype.App 的「管理介面」區段）。
-        llm_store：llmstore.LLMStore，多組 LLM 設定；使用中那組改了要同步到 cfg["llm"]。"""
+        llm_store：llmstore.LLMStore，多組 LLM 設定；使用中那組改了要同步到 cfg["llm"]。
+        memory：memory.MemoryStore，手動修正學到的記憶。"""
         self.h, self.get_cfg, self.config_path, self._copy = history, get_cfg, config_path, copy
+        self.memory = memory
         self.llm_store = llm_store
         self.on_asr_change, self.system = on_asr_change, system
         self.asr_status = asr_status or (lambda: {"loading": False, "error": ""})
@@ -53,7 +57,12 @@ class Api:
                 for r in self.h.list(query)]
 
     def get(self, rid):
-        return self.h.get(int(rid))
+        """紀錄加上 memories_used：整理時參考了哪些記憶（顯示在「資訊」）。"""
+        r = self.h.get(int(rid))
+        if r and self.memory:
+            r["memories_used"] = [{"id": m["id"], "src": m["src"], "dst": m["dst"], "status": m["status"]}
+                                  for m in self.memory.by_ids(r["memories"])]
+        return r
 
     def audio(self, rid):
         p = self.h.wav_path(int(rid))
@@ -70,20 +79,25 @@ class Api:
             raise ValueError(t("err_edit_no_selection"))
         cfg = self.get_cfg()
         ctx = {k: r[k] for k in ("app", "bundle", "title", "selection") if r.get(k)}
-        text, ok = llm_refine(r["raw"], mode, cfg, ctx)
+        mems = self.memory.pick(r["raw"]) if self.memory and cfg["memory_enabled"] else []
+        text, ok = llm_refine(r["raw"], mode, cfg, {**ctx, "memories": mems})
         if not ok:
             raise RuntimeError(t("err_dgx_no_response"))
-        self.h.update(int(rid), text=apply_replacements(text, cfg), mode=mode, ok=1, ai_text=None, edited=0)
-        return self.h.get(int(rid))
+        self.h.update(int(rid), text=apply_replacements(text, cfg), mode=mode, ok=1, ai_text=None, edited=0,
+                      memories=[m["id"] for m in mems])
+        return self.get(rid)
 
-    def save_text(self, rid, text):
-        """手動修改「AI 整理後」：保留修改前的 DGX 輸出（ai_text），比對差異時用來找聽錯的詞。"""
+    def save_text(self, rid, text, _learned=None):
+        """手動修改「AI 整理後」：保留修改前的 DGX 輸出（ai_text），並把這次改的地方學成記憶。
+        比對的是「這次儲存前 → 儲存後」，同一筆分幾次改不會重複計算。回傳紀錄加上 learned（這次學到的記憶）。"""
         rid, r = int(rid), self.h.get(int(rid))
         ai = r["ai_text"] if r["ai_text"] is not None else r["text"]  # 空字串也是有效的 DGX 輸出
         self.h.update(rid, text=text, ai_text=ai, edited=int(text != ai))
+        if _learned is None:
+            _learned = self.memory.learn_edit(r["text"], text, rid) if self.memory else []
         if self.system:
             self.system.text_edited(rid, text)  # 「重新貼上上一次結果」要用改過的版本
-        return self.h.get(rid)
+        return {**self.get(rid), "learned": [self._memory_out(m) for m in _learned]}
 
     def record_suggest(self, rid):
         r = self.h.get(int(rid))
@@ -95,7 +109,14 @@ class Api:
             raise ValueError(t("err_record_text_changed"))
         if add_rule:
             self.repl_set(original, suggestion)  # 1 個字的規則會在這裡擋下，紀錄也不會被改
-        return self.save_text(rid, r["text"].replace(original, suggestion, 1))
+        # 使用者確認過是聽錯，直接學起來，不經過 correction_pairs 的判斷
+        learned = []
+        if self.memory:
+            m = self.memory.learn(original, suggestion, snippet(r["text"].replace(original, suggestion, 1), suggestion), int(rid))
+            if add_rule:
+                self.memory.set_status(m["id"], "repl")
+            learned = [self.memory.get(m["id"])]
+        return self.save_text(rid, r["text"].replace(original, suggestion, 1), _learned=learned)
 
     def corrections(self):
         return suggest_corrections(self.h.list(limit=500), self.get_cfg())
@@ -123,6 +144,77 @@ class Api:
                 self.repl_set(c["src"], c["dst"])
                 added.append(c)
         return {**self.vocab(), "corrections": self.corrections(), "added": len(added)}
+
+    # ---------- 記憶 ----------
+    def _memory_out(self, m):
+        """加上升級建議：出現 2 次以上建議設為替換規則；正確寫法是英文專有名詞建議加入詞彙（只標示，不自動升級）。"""
+        cfg = self.get_cfg()
+        auto = m["status"] == "auto"
+        return {**m,
+                "suggest_repl": auto and m["count"] >= 2 and len(m["src"].strip()) >= 2 and m["src"] not in cfg["replacements"],
+                "suggest_vocab": auto and bool(PROPER_NOUN.fullmatch(m["dst"]))
+                                 and m["dst"].lower() not in {v.lower() for v in cfg["vocabulary"]}}
+
+    def memories(self, query="", status=""):
+        items = self.memory.list(query, status)
+        return {"items": [self._memory_out(m) for m in items], "enabled": self.get_cfg()["memory_enabled"]}
+
+    def memory_set(self, mid, action):
+        """action：repl（設為替換規則）、vocab（加入詞彙）、off（不是聽錯／停用）、on（重新啟用）。"""
+        m = self.memory.get(int(mid))
+        if not m:
+            raise ValueError(t("err_memory_not_found"))
+        if action == "repl":
+            self.repl_set(m["src"], m["dst"])  # 1 個字的會在這裡擋下
+        elif action == "vocab":
+            self.vocab_add(m["dst"])
+        elif action not in ("off", "on"):
+            raise ValueError(action)
+        if m["status"] == "repl" and action != "repl":
+            self._drop_rule(m)
+        self.memory.set_status(m["id"], "auto" if action == "on" else action)
+        return {**self.vocab(), "memory": self._memory_out(self.memory.get(m["id"]))}
+
+    def memory_delete(self, mid):
+        m = self.memory.get(int(mid))
+        if m:
+            if m["status"] == "repl":
+                self._drop_rule(m)
+            self.memory.delete(m["id"])
+        return True
+
+    def _drop_rule(self, m):
+        """記憶原本是替換規則、改成其他狀態或刪除時，一起拿掉那條規則（規則被改成別的就不動）。"""
+        if self.get_cfg()["replacements"].get(m["src"]) == m["dst"]:
+            self.repl_remove(m["src"])
+
+    def memory_export(self):
+        """存到「下載項目」並在 Finder 標示出來；回傳檔案路徑。"""
+        path = Path.home() / "Downloads" / time.strftime("voicetype-memory-%Y%m%d-%H%M%S.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": 1, "memories": self.memory.export()}, ensure_ascii=False, indent=2))
+        if self.system:
+            self.system.reveal(path)
+        return str(path)
+
+    def memory_import(self, path=None):
+        """沒給路徑時跳出選檔視窗（取消回傳 None）。接受匯出的格式或直接一個陣列。"""
+        path = path or (self.system.choose_file() if self.system else None)
+        if not path:
+            return None
+        try:
+            data = json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            raise ValueError(t("err_memory_import_invalid"))
+        items = data.get("memories") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise ValueError(t("err_memory_import_invalid"))
+        return {"added": self.memory.import_([it for it in items if isinstance(it, dict)])}
+
+    def memory_enabled_set(self, enabled):
+        self.get_cfg()["memory_enabled"] = bool(enabled)
+        self._save()
+        return self.settings()
 
     def mics(self):
         cfg = self.get_cfg()
@@ -180,7 +272,7 @@ class Api:
 
     def settings(self):
         cfg = self.get_cfg()
-        return {"history_days": cfg["history_days"]}
+        return {"history_days": cfg["history_days"], "memory_enabled": cfg["memory_enabled"]}
 
     def history_days_set(self, days):
         days = int(float(days))

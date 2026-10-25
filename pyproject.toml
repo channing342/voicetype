@@ -1,6 +1,6 @@
 [project]
 name = "voicetype"
-version = "1.1"  # 主.次：每次發布次版號 +1；設定檔不相容或大改版時主版號 +1、次版號歸 0
+version = "1.2"  # 主.次：每次發布次版號 +1；設定檔不相容或大改版時主版號 +1、次版號歸 0
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=50.0.2",
@@ -11,6 +11,7 @@ dependencies = [
     "pynput>=1.8.2",
     "pyobjc-framework-applicationservices>=12.2.2",
     "pyobjc-framework-webkit>=12.2.2",
+    "pypinyin>=0.55.0",
     "rumps>=0.4.0",
     "sounddevice>=0.5.6",
 ]

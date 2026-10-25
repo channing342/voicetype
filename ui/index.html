@@ -227,6 +227,14 @@ main.on { display: flex; }
 .opt .sub { font-size: 13px; color: var(--muted); }
 .tag { font-size: 12px; color: var(--muted); margin-left: 8px; font-weight: 400; }
 .tag.warn { color: var(--warn); }
+/* 記憶 */
+.fix .tag { margin-left: 0; }
+.fix .ops { display: flex; gap: 8px; margin-left: auto; }  /* 按鈕整組一起換行 */
+.fix .tag.suggest { color: var(--accent); }
+.fix.off .pair { color: var(--faint); text-decoration: line-through; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 8px; }
+#learned:not(:empty) { padding: 0 22px 10px; display: flex; flex-direction: column; gap: 6px; }
+#learned .head { font-size: 13px; color: var(--ok); }
 
 /* 詞彙 */
 #vocab { flex-direction: column; overflow-y: auto; padding: 18px; gap: 16px; }
@@ -307,6 +315,24 @@ main.on { display: flex; }
 
 <main id="vocab">
   <div class="card">
+    <h2 data-i18n="mem_title"></h2>
+    <p class="hint" data-i18n="mem_hint"></p>
+    <div class="row">
+      <input id="memQ" type="search" data-i18n-placeholder="mem_search_placeholder">
+      <select id="memStatus"><option value="" data-i18n="mem_filter_all"></option><option value="auto" data-i18n="mem_status_auto"></option><option value="repl" data-i18n="mem_status_repl"></option><option value="vocab" data-i18n="mem_status_vocab"></option><option value="off" data-i18n="mem_status_off"></option></select>
+      <button id="memExport" data-i18n="mem_export_btn"></button><button id="memImport" data-i18n="mem_import_btn"></button>
+      <span class="status" id="memMsg"></span>
+    </div>
+    <div class="status" id="memOff" style="display:none" data-i18n="mem_disabled_notice"></div>
+    <div class="fixes" id="memList"></div>
+  </div>
+  <div class="card">
+    <h2 data-i18n="corr_title"></h2>
+    <p class="hint" data-i18n="corr_hint"></p>
+    <div class="row"><button id="corrScan" data-i18n="corr_scan_btn"></button><button id="corrAll" style="display:none" data-i18n="corr_add_all_btn"></button><span class="status" id="corrStatus"></span></div>
+    <div class="fixes" id="corrList"></div>
+  </div>
+  <div class="card">
     <h2 data-i18n="vocab_title"></h2>
     <p class="hint" data-i18n="vocab_hint"></p>
     <div class="row"><input id="newWord" type="text" data-i18n-placeholder="vocab_add_placeholder"><button class="primary" id="addWord" data-i18n="btn_add"></button></div>
@@ -320,12 +346,6 @@ main.on { display: flex; }
       <input id="rDst" type="text" data-i18n-placeholder="repl_dst_placeholder"><button class="primary" id="addRepl" data-i18n="btn_add"></button>
     </div>
     <table class="rtable" id="repls"></table>
-  </div>
-  <div class="card">
-    <h2 data-i18n="corr_title"></h2>
-    <p class="hint" data-i18n="corr_hint"></p>
-    <div class="row"><button id="corrScan" data-i18n="corr_scan_btn"></button><button id="corrAll" style="display:none" data-i18n="corr_add_all_btn"></button><span class="status" id="corrStatus"></span></div>
-    <div class="fixes" id="corrList"></div>
   </div>
 </main>
 
@@ -361,6 +381,12 @@ main.on { display: flex; }
         <button id="llmNew" data-i18n="llm_btn_new"></button>
       </aside>
     </div>
+  </div>
+  <div class="card">
+    <h2 data-i18n="mem_settings_title"></h2>
+    <p class="hint" data-i18n="mem_settings_hint"></p>
+    <label class="check"><input type="checkbox" id="memEnabled"><span data-i18n="mem_enabled_label"></span></label>
+    <div class="status" id="memEnabledStatus"></div>
   </div>
   <div class="card">
     <h2 data-i18n="mic_title"></h2>
@@ -464,6 +490,7 @@ function renderDetail(showInfo = false) {
       <span class="meta">${fmtTime(r.created)} · ${esc(r.app || "—")} · ${modeName(r.mode)}${r.ok ? "" : ` · <span class="badge-warn">${t("hist_dgx_failed")}</span>`}${r.edited ? ` · <span class="badge">${t("hist_edited_badge")}</span>` : ""}</span>
     </div>
     <div class="body" id="dbody">${bodyHtml()}</div>
+    <div id="learned"></div>
     <div class="fixes" id="fixes"></div>
     ${showInfo ? `<dl class="info">
       <dt>${t("hist_info_time")}</dt><dd>${new Date(r.created * 1000).toLocaleString(LANG, { hour12: false })}</dd>
@@ -475,6 +502,7 @@ function renderDetail(showInfo = false) {
       <dt>${t("hist_info_dgx_time")}</dt><dd>${t("hist_seconds_val", {s: (r.t_llm || 0).toFixed(2)})}</dd>
       <dt>${t("hist_info_dgx_res")}</dt><dd>${r.ok ? t("hist_dgx_ok") : `<span class="badge-warn">${t("hist_dgx_fallback")}</span>`}</dd>
       <dt>${t("hist_info_model")}</dt><dd>${esc(r.model || "—")}</dd>
+      <dt>${t("hist_info_memories")}</dt><dd>${(r.memories_used || []).map((m) => `${esc(m.src)} → ${esc(m.dst)}`).join("、") || "—"}</dd>
       ${r.edited ? `<dt>${t("hist_info_ai_text")}</dt><dd>${esc(r.ai_text)}</dd>` : ""}</dl>` : ""}
     <div class="player">
       <button id="play" title="${esc(t("btn_play"))}"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path id="playIcon" d="M7 4.5v15l13-7.5z"/></svg></button>
@@ -500,7 +528,10 @@ function renderDetail(showInfo = false) {
     fit();
     ta.oninput = () => { fit(); $("#save").style.display = ta.value !== r.text ? "" : "none"; };
   }
-  $("#save").onclick = async () => { current = await call("save_text", r.id, $("#aiText").value); renderDetail(showInfo); refresh(); };
+  $("#save").onclick = async () => {
+    current = await call("save_text", r.id, $("#aiText").value);
+    learned = { id: r.id, items: current.learned || [] }; renderDetail(showInfo); refresh();
+  };
   $("#misheard").onclick = async () => {
     const b = $("#misheard"); b.disabled = true; b.textContent = t("hist_analyzing");
     try { fixList = { id: r.id, items: await call("record_suggest", r.id), done: true }; b.textContent = t("hist_misheard_btn"); renderFixes(); }
@@ -508,6 +539,7 @@ function renderDetail(showInfo = false) {
     b.disabled = false;
   };
   renderFixes();
+  renderLearned();
   $("#redo").onclick = async () => {
     const b = $("#redo");
     if (r.edited && !b.classList.contains("armed")) {  // 手動改過：先提醒會被覆蓋
@@ -546,9 +578,31 @@ function renderFixes() {
     row.querySelector(".apply").onclick = async () => {
       try {
         current = await call("record_apply", r.id, f.original, f.suggestion, row.querySelector(".rule").checked);
+        learned = { id: r.id, items: current.learned || [] };
         fixList.items.splice(i, 1); renderDetail(infoOpen); refresh();
       } catch (e) { row.querySelector(".why").textContent = errText(e); }
     };
+  });
+}
+/* 儲存後學到的修正：可以當場設為替換規則、加入詞彙，或標成不是聽錯（停用） */
+let learned = { id: null, items: [] };
+function renderLearned() {
+  const r = current, el = $("#learned");
+  if (!el) return;
+  if (learned.id !== r.id || !learned.items.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="head">${t("mem_learned_count", {n: learned.items.length})}</div>` + learned.items.map((m, i) => `<div class="fix" data-i="${i}">
+      <span class="pair">${esc(m.src)} → <b>${esc(m.dst)}</b></span><span class="why">${m.done ? t("mem_done_" + m.done) : ""}</span><span class="gap"></span>
+      ${m.done ? "" : `<button class="always" ${m.status === "repl" || m.src.length < 2 ? "disabled" : ""} ${m.src.length < 2 ? `title="${esc(t("corr_single_char_warn"))}"` : ""}>${t("mem_btn_always")}</button>
+      <button class="vocab">${t("corr_btn_add_vocab")}</button><button class="link off">${t("mem_btn_not_misheard")}</button>`}</div>`).join("");
+  el.querySelectorAll(".fix").forEach((row) => {
+    const m = learned.items[+row.dataset.i];
+    const act = (action) => async () => {
+      try { await call("memory_set", m.id, action); m.done = action; renderLearned(); }
+      catch (e) { row.querySelector(".why").textContent = errText(e); }
+    };
+    row.querySelector(".always") && (row.querySelector(".always").onclick = act("repl"));
+    row.querySelector(".vocab") && (row.querySelector(".vocab").onclick = act("vocab"));
+    row.querySelector(".off") && (row.querySelector(".off").onclick = act("off"));
   });
 }
 function flashBtn(b, t) { const o = b.textContent; b.textContent = t; setTimeout(() => b.textContent = o, 1200); }
@@ -621,7 +675,54 @@ function renderVocab(v) {
   $("#repls").innerHTML = rs.map(([s, d]) => `<tr><td>${esc(s)}</td><td class="arrow">→</td><td>${esc(d)}</td><td class="op"><button title="${esc(t("btn_delete"))}" data-s="${esc(s)}">✕</button></td></tr>`).join("") || `<tr><td class="status">${t("repl_empty")}</td></tr>`;
   document.querySelectorAll(".rtable button").forEach((b) => b.onclick = async () => renderVocab(await call("repl_remove", b.dataset.s)));
 }
-async function loadVocab() { renderVocab(await call("vocab")); }
+async function loadVocab() { renderVocab(await call("vocab")); loadMemories(); }
+
+/* ---------- 記憶 ---------- */
+async function loadMemories() {
+  const q = $("#memQ").value.trim(), st = $("#memStatus").value, m = await call("memories", q, st);
+  $("#memOff").style.display = m.enabled ? "none" : "";
+  $("#memList").innerHTML = m.items.length ? m.items.map((x, i) => `<div class="fix ${x.status === "off" ? "off" : ""}" data-i="${i}">
+      <span class="pair">${esc(x.src)} → <b>${esc(x.dst)}</b></span>
+      <span class="tag">${t("mem_status_" + x.status)}</span>
+      <span class="why">${t("corr_times", {count: x.count})} · ${x.last_used ? t("mem_last_used", {time: fmtTime(x.last_used)}) : t("mem_never_used")}</span>
+      ${x.suggest_repl ? `<span class="tag suggest">${t("mem_suggest_repl")}</span>` : ""}${x.suggest_vocab ? `<span class="tag suggest">${t("mem_suggest_vocab")}</span>` : ""}
+      <span class="gap"></span><span class="ops">
+      ${x.status === "off" ? `<button data-a="on">${t("mem_btn_on")}</button>` : `
+        ${x.status === "repl" ? "" : `<button data-a="repl" ${x.src.length < 2 ? `disabled title="${esc(t("corr_single_char_warn"))}"` : ""}>${t("corr_btn_add_rule")}</button>`}
+        ${x.status === "auto" ? `<button data-a="vocab">${t("corr_btn_add_vocab")}</button>` : ""}
+        <button data-a="off">${t("mem_btn_off")}</button>`}
+      ${x.records.length ? `<button class="link" data-rec="${x.records[x.records.length - 1]}">${t("mem_btn_open_record")}</button>` : ""}
+      <button class="link danger" data-del>${t("btn_delete")}</button></span>
+      ${x.example ? `<span class="ex">「…${esc(x.example)}…」</span>` : ""}</div>`).join("")
+    : `<div class="status">${q || st ? t("mem_no_match") : t("mem_empty")}</div>`;
+  document.querySelectorAll("#memList .fix").forEach((row) => {
+    const x = m.items[+row.dataset.i];
+    const fail = (e) => { row.querySelector(".why").textContent = errText(e); };
+    row.querySelectorAll("[data-a]").forEach((b) => b.onclick = async () => {
+      try { renderVocab(await call("memory_set", x.id, b.dataset.a)); loadMemories(); } catch (e) { fail(e); }
+    });
+    const o = row.querySelector("[data-rec]");
+    if (o) o.onclick = async () => {
+      const id = +o.dataset.rec;
+      if (!await call("get", id)) { fail(new Error(t("mem_record_gone"))); return; }
+      showTab("history"); open(id);
+    };
+    const d = row.querySelector("[data-del]");
+    d.onclick = async () => {
+      if (!d.classList.contains("armed")) { d.classList.add("armed"); d.textContent = t("btn_confirm_delete"); setTimeout(() => { d.classList.remove("armed"); d.textContent = t("btn_delete"); }, 3000); return; }
+      await call("memory_delete", x.id); loadVocab();
+    };
+  });
+}
+let memTimer; $("#memQ").oninput = () => { clearTimeout(memTimer); memTimer = setTimeout(loadMemories, 200); };
+$("#memStatus").onchange = loadMemories;
+$("#memExport").onclick = async () => {
+  try { $("#memMsg").textContent = t("mem_exported", {path: await call("memory_export")}); } catch (e) { $("#memMsg").textContent = errText(e); }
+};
+$("#memImport").onclick = async () => {
+  try { const r = await call("memory_import"); if (r) { $("#memMsg").textContent = t("mem_imported", {n: r.added}); loadMemories(); } }
+  catch (e) { $("#memMsg").textContent = errText(e); }
+};
 $("#addWord").onclick = async () => { const w = $("#newWord").value.trim(); if (!w) return; renderVocab(await call("vocab_add", w)); $("#newWord").value = ""; };
 $("#newWord").onkeydown = (e) => e.key === "Enter" && $("#addWord").click();
 $("#addRepl").onclick = async () => {
@@ -633,7 +734,7 @@ function renderCorr(list) {
   $("#corrStatus").textContent = list.length ? t("corr_found_count", {n: list.length}) : t("corr_no_new_suggestions");
   $("#corrAll").style.display = list.some((c) => c.count >= 2 && c.src.length >= 2) ? "" : "none";
   $("#corrList").innerHTML = list.map((c, i) => `<div class="fix" data-i="${i}">
-      <span class="pair">${esc(c.src)} → <b>${esc(c.dst)}</b></span><span class="why">${t("corr_times", {count: c.count})}${c.manual ? t("corr_manual_suffix") : ""}</span><span class="gap"></span>
+      <span class="pair">${esc(c.src)} → <b>${esc(c.dst)}</b></span><span class="why">${t("corr_times", {count: c.count})}</span><span class="gap"></span>
       <button class="repl" ${c.src.length < 2 ? `disabled title="${esc(t("corr_single_char_warn"))}"` : ""}>${t("corr_btn_add_rule")}</button>
       <button class="vocab">${t("corr_btn_add_vocab")}</button><button class="link ignore">${t("btn_ignore")}</button>
       ${c.example ? `<span class="ex">「…${esc(c.example)}…」</span>` : ""}</div>`).join("");
@@ -724,7 +825,11 @@ $("#micSel").onchange = async () => {
   try { await call("mic_set", $("#micSel").value); $("#micStatus").innerHTML = `<span class="ok-text">${t("mic_saved_notice")}</span>`; }
   catch (e) { $("#micStatus").innerHTML = `<span class="badge-warn">${esc(errText(e))}</span>`; }
 };
-async function loadHistoryDays() { $("#historyDays").value = (await call("settings")).history_days; }
+async function loadHistoryDays() { const s = await call("settings"); $("#historyDays").value = s.history_days; $("#memEnabled").checked = s.memory_enabled; }
+$("#memEnabled").onchange = async () => {
+  try { await call("memory_enabled_set", $("#memEnabled").checked); $("#memEnabledStatus").innerHTML = `<span class="ok-text">${t("mem_enabled_saved")}</span>`; }
+  catch (e) { $("#memEnabledStatus").innerHTML = `<span class="badge-warn">${esc(errText(e))}</span>`; }
+};
 $("#historySave").onclick = async () => {
   try {
     const s = await call("history_days_set", $("#historyDays").value);

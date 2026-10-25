@@ -4,7 +4,7 @@ import subprocess
 import time
 
 import objc
-from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSWorkspace
+from AppKit import NSApplication, NSModalResponseOK, NSOpenPanel, NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSWorkspace
 from Foundation import NSLocale
 import ApplicationServices as AX
 import Quartz
@@ -245,3 +245,12 @@ def system_language():
         return str(langs[0]) if langs else ""
     except Exception:
         return ""
+
+
+def choose_json_file():
+    """選一個 JSON 檔（只能在主執行緒呼叫）。取消回傳 None。"""
+    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)  # Accessory App 不先啟用的話視窗會在後面
+    panel = NSOpenPanel.openPanel()
+    panel.setAllowedFileTypes_(["json"])
+    panel.setAllowsMultipleSelection_(False)
+    return str(panel.URL().path()) if panel.runModal() == NSModalResponseOK else None

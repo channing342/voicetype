@@ -20,6 +20,7 @@ from core import (VERSION, CONFIG_PATH, KEY_ESC, MOD_FLAGS, MODE_NAMES, RECORD_M
                   mic_name, mic_options, pick_input, resolve_lang, sd_index, save_config, transcribe, translate, translate_kind, TRANSLATE_LABELS)
 from history import History
 from llmstore import LLMStore
+from memory import MemoryStore
 from hud import Hud, TranslatePanel
 from window import Api, MainWindow
 from i18n import Labels, get_lang, set_lang, t
@@ -52,6 +53,9 @@ class App(rumps.App):
         self.ctx_thread = threading.Thread()
         self.keys = KeyLogic(self.cfg["hold_threshold"])
         self.rec, self.hud, self.history, self.purged = Recorder(self.choose_mic), Hud(), History(), 0.0
+        self.memory = MemoryStore()
+        # 第一次啟動新版時從以前手動改過的紀錄補學（之後只學新的修正）
+        threading.Thread(target=lambda: self.memory.backfill(self.history.list(limit=100000)), daemon=True).start()
         self.last_id, self.mic_uids = None, ()  # last_id：最近一次貼上的紀錄；mic_uids：選單上列出的麥克風
         self.listener, self.tap_disabled, self.tap_checked = None, False, 0.0
         self.tpanel, self.tr_seq = TranslatePanel(lambda t: macos.copy_text(t, transient=True),
@@ -62,7 +66,7 @@ class App(rumps.App):
         self.switch_asr()  # 預熱模型（也設定 asr_state，要在 Api 之前）
         self.win = MainWindow(Api(self.history, lambda: self.cfg, copy=macos.copy_text,
                                   on_asr_change=self.switch_asr, asr_status=lambda: dict(self.asr_state),
-                                  system=self, llm_store=self.llm_store))
+                                  system=self, llm_store=self.llm_store, memory=self.memory))
         self.build_menu()
         self.timer = rumps.Timer(self.tick, SLOW)
         self.timer.start()
@@ -223,6 +227,21 @@ class App(rumps.App):
 
     def open_privacy(self, key):
         macos.open_privacy(key)
+
+    def reveal(self, path):
+        subprocess.run(["open", "-R", str(path)])
+
+    def choose_file(self):
+        """管理介面在背景執行緒呼叫：到主執行緒跳出選檔視窗，等使用者選完。回傳路徑或 None。"""
+        done, result = threading.Event(), []
+        def run():
+            try:
+                result.append(macos.choose_json_file())
+            finally:
+                done.set()
+        AppHelper.callAfter(run)
+        done.wait()
+        return result[0] if result else None
 
     def restart(self):
         """部分 macOS 版本授權後要重開才建得了 event tap。"""
@@ -526,7 +545,8 @@ class App(rumps.App):
             self.set_flash(t("flash_no_text"), 1.5)
             return
         self.stage, self.stage_start = "llm", t1
-        text, ok = llm_refine(raw, mode, self.cfg, ctx)
+        mems = self.memory.pick(raw) if self.cfg["memory_enabled"] else []
+        text, ok = llm_refine(raw, mode, self.cfg, {**ctx, "memories": mems})
         t2 = time.time()
         text = apply_replacements(text, self.cfg)
         if mode == "edit" and not ok:
@@ -541,7 +561,8 @@ class App(rumps.App):
         rid = self.history.add(audio, mode=mode, app=ctx.get("app", ""), bundle=ctx.get("bundle", ""),
                          title=ctx.get("title", ""), duration=len(audio) / SAMPLE_RATE, raw=raw, text=text,
                          segments=segments, ok=int(ok), t_transcribe=t1 - t0, t_llm=t2 - t1,
-                         model=self.cfg["asr_model"], selection=ctx.get("selection", "") if mode == "edit" else "")
+                         model=self.cfg["asr_model"], selection=ctx.get("selection", "") if mode == "edit" else "",
+                         memories=[m["id"] for m in mems])
         if mode != "edit" or ok:
             self.last_id = rid
         self.win.js("refresh()")

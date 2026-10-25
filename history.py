@@ -12,9 +12,10 @@ from core import SAMPLE_RATE
 DATA_DIR = Path.home() / ".local/share/voicetype"
 
 FIELDS = ("created", "mode", "app", "bundle", "title", "duration", "raw", "text", "segments",
-          "ok", "t_transcribe", "t_llm", "model", "selection", "ai_text", "edited")
-# 後來加的欄位：舊資料庫啟動時補上。ai_text＝使用者手動修改前的 DGX 輸出；edited＝是否手動改過
-ADDED = {"ai_text": "TEXT", "edited": "INTEGER DEFAULT 0"}
+          "ok", "t_transcribe", "t_llm", "model", "selection", "ai_text", "edited", "memories")
+# 後來加的欄位：舊資料庫啟動時補上。ai_text＝使用者手動修改前的 DGX 輸出；edited＝是否手動改過；
+# memories＝整理時送給 DGX 參考的記憶 id（JSON 陣列）
+ADDED = {"ai_text": "TEXT", "edited": "INTEGER DEFAULT 0", "memories": "TEXT"}
 
 
 class History:
@@ -41,7 +42,8 @@ class History:
         return self.audio_dir / f"{rid}.wav"
 
     def add(self, audio, **rec):
-        rec = {"created": time.time(), **rec, "segments": json.dumps(rec.get("segments", []), ensure_ascii=False)}
+        rec = {"created": time.time(), **rec, "segments": json.dumps(rec.get("segments", []), ensure_ascii=False),
+               "memories": json.dumps(rec.get("memories", []))}
         cols = [f for f in FIELDS if f in rec]
         with self._conn() as c:
             rid = c.execute(f"INSERT INTO recordings ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
@@ -56,6 +58,7 @@ class History:
     def _row(self, r):
         d = dict(r)
         d["segments"] = json.loads(d["segments"] or "[]")
+        d["memories"] = json.loads(d.get("memories") or "[]")
         d["ok"], d["edited"] = bool(d["ok"]), bool(d["edited"])
         return d
 
@@ -74,6 +77,8 @@ class History:
         return self._row(r) if r else None
 
     def update(self, rid, **fields):
+        if isinstance(fields.get("memories"), list):
+            fields["memories"] = json.dumps(fields["memories"])
         cols = [f for f in fields if f in FIELDS]
         with self._conn() as c:
             c.execute(f"UPDATE recordings SET {','.join(f + '=?' for f in cols)} WHERE id = ?",

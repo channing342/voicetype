@@ -13,6 +13,7 @@ import pytest
 import core
 import i18n
 from history import History
+from memory import MemoryStore
 
 
 @pytest.fixture(autouse=True)
@@ -426,14 +427,13 @@ def test_suggest_corrections():
         {"mode": "clean", "raw": "全線的部分", "text": "權限的部分。", "ai_text": None, "edited": False},
         {"mode": "organize", "raw": "全線很亂", "text": "權限很亂", "ai_text": None, "edited": False},  # 整理模式不算
         {"mode": "english", "raw": "我明天到", "text": "I'll arrive tomorrow", "ai_text": "I'll arrive tomorrow", "edited": False},
-        {"mode": "organize", "raw": "x", "text": "請 Papaya-VPC 開通", "ai_text": "請怕怕呀 VPC 開通", "edited": True},  # 手動改的都算
+        {"mode": "organize", "raw": "x", "text": "請 Papaya-VPC 開通", "ai_text": "請怕怕呀 VPC 開通", "edited": True},  # 手動改的交給記憶，不算
         {"mode": "clean", "raw": "歐提帳號", "text": "OT 帳號", "ai_text": None, "edited": False},
     ]
     cfg = cfg_with(replacements={"歐提": "OT"})
     out = core.suggest_corrections(recs, cfg)
     assert out[0]["src"] == "全線" and out[0]["dst"] == "權限" and out[0]["count"] == 2 and "權限" in out[0]["example"]
-    manual = [c for c in out if c["manual"]]
-    assert manual and manual[0]["dst"].startswith("Papaya")
+    assert not any(c["dst"].startswith("Papaya") for c in out)
     assert not any(c["src"] == "歐提" for c in out)  # 已有替換規則
     cfg["ignored_corrections"] = ["全線→權限"]
     assert not any(c["src"] == "全線" for c in core.suggest_corrections(recs, cfg))
@@ -1055,6 +1055,7 @@ def app(tmp_path, monkeypatch):
     a.ctx_thread = threading.Thread()
     a.keys = core.KeyLogic(0.4)
     a.rec, a.history, a.purged, a.jobs = FakeRec(), History(tmp_path), 0.0, queue.Queue()
+    a.memory = MemoryStore(tmp_path / "history.db")
     a.js_calls, a.notes = [], []
     a.win = type("W", (), {"js": lambda self, code: a.js_calls.append(code), "show": lambda self, tab: None,
                            "visible": lambda self: False})()
@@ -1669,3 +1670,196 @@ def test_ui_i18n_keys_and_html():
     cjk_chars = re.findall(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", cleaned)
     assert not cjk_chars, f"Found CJK characters outside comments: {cjk_chars[:20]}"
 
+
+
+# ---------- 記憶：手動修正學成「聽錯 → 正確」 ----------
+
+def test_is_mishearing_filters_rewrites():
+    assert core.is_mishearing("歐提", "OTP")  # 中文改成英文專有名詞
+    assert core.is_mishearing("全線", "權限")  # 讀音相近
+    assert core.is_mishearing("Istio", "SQLite")  # 英文拼字差很多，門檻放低
+    assert not core.is_mishearing("開心", "難過")  # 讀音不同：改寫
+    assert not core.is_mishearing("python", "java")
+    assert not core.is_mishearing("今天天氣很好", "我們明天一起去吃晚餐好不好呢")  # 太長
+    assert not core.is_mishearing("", "X") and not core.is_mishearing("同", "同")
+
+
+def test_correction_pairs_and_single_char_context():
+    assert core.correction_pairs("我們用歐提登入", "我們用OTP登入") == [("歐提", "OTP", "我們用OTP登入")]
+    assert core.correction_pairs("設定擋要改", "設定檔要改")[0][:2] == ("定擋", "定檔")  # 單字帶前一個字
+    assert core.correction_pairs("擋要改", "檔要改")[0][:2] == ("擋要", "檔要")  # 前面沒字就帶後一個
+    assert core.correction_pairs("我很開心", "我很難過") == []
+    assert core.correction_pairs("好，", "好。") == []  # 只改標點
+
+
+def test_pick_memories_and_prompt():
+    ms = [{"id": 1, "src": "歐提", "dst": "OTP", "example": "", "count": 1},
+          {"id": 2, "src": "雷特", "dst": "Redis", "example": "Redis 快取", "count": 9},
+          {"id": 3, "src": "全線", "dst": "權限", "example": "", "count": 3}]
+    assert [m["id"] for m in core.pick_memories("全線要開", ms)][0] == 3  # 原文出現的優先
+    assert [m["id"] for m in core.pick_memories("請輸入偶題", ms)][0] == 1  # 讀音出現在原文裡
+    assert [m["id"] for m in core.pick_memories("無關", ms)] == [2, 3, 1]  # 其他依次數
+    assert len(core.pick_memories("x", ms * 10, limit=15)) == 15
+    p = core.memory_prompt(ms[1:2])
+    assert "雷特 → Redis（例句：Redis 快取）" in p
+    msgs = core.build_messages("雷特", "clean", cfg_with(vocabulary=[]), {"memories": ms[1:2]})
+    assert "雷特 → Redis" in msgs[0]["content"]
+    assert "以前手動修正" not in core.build_messages("雷特", "clean", cfg_with(vocabulary=[]))[0]["content"]
+
+
+def test_memory_store_learn_unlearn_status(tmp_path):
+    st = MemoryStore(tmp_path / "h.db")
+    m = st.learn("雷特", "Redis", "Redis 快取", 1)
+    st.learn("雷特", "Redis", "", 2)
+    m = st.get(m["id"])
+    assert m["count"] == 2 and m["records"] == [1, 2] and m["example"] == "Redis 快取" and m["status"] == "auto"
+    st.learn("雷特", "雷特斯", "", 3)  # 同一個聽錯的詞可以有多種正確寫法
+    assert len(st.list(query="雷特")) == 2
+    st.unlearn("雷特", "Redis"); st.unlearn("雷特", "Redis")
+    assert st.get(m["id"])["status"] == "off" and st.get(m["id"])["count"] == 0  # 扣到 0 停用
+    st.learn("雷特", "Redis", "", 4)
+    assert st.get(m["id"])["status"] == "auto"  # 被扣到 0 的重新學會就啟用
+    st.set_status(m["id"], "off")
+    st.learn("雷特", "Redis", "", 5)
+    assert st.get(m["id"])["status"] == "off"  # 使用者停用的維持停用
+    st.set_status(m["id"], "repl")
+    assert m["id"] not in [x["id"] for x in st.active()]  # 替換規則不佔 prompt
+    with pytest.raises(ValueError):
+        st.set_status(m["id"], "bogus")
+    st.delete(m["id"])
+    assert st.get(m["id"]) is None
+
+
+def test_memory_learn_edit_reverts_and_backfill(tmp_path):
+    st = MemoryStore(tmp_path / "h.db")
+    learned = st.learn_edit("用雷特快取", "用Redis快取", 7)
+    assert [(m["src"], m["dst"]) for m in learned] == [("雷特", "Redis")]
+    assert st.learn_edit("用Redis快取", "用雷特快取", 7) == []  # 改回去：扣次數、不反向學
+    assert st.find("雷特", "Redis")["status"] == "off" and st.find("Redis", "雷特") is None
+    recs = [{"id": 1, "edited": True, "ai_text": "有些全線要調整", "text": "有些權限要調整"},
+            {"id": 2, "edited": False, "ai_text": None, "text": "沒改"}]
+    assert st.backfill(recs) == 1 and st.find("全線", "權限")["records"] == [1]
+    assert st.backfill(recs) == 0  # 只補一次
+
+
+def test_memory_pick_touch_export_import(tmp_path):
+    st = MemoryStore(tmp_path / "h.db")
+    a = st.learn("全線", "權限", "權限要調整", 1)
+    st.learn("歐提", "OTP", "", 2)
+    picked = st.pick("全線要開")
+    assert picked[0]["id"] == a["id"] and st.get(a["id"])["last_used"]
+    data = st.export()
+    assert {d["src"] for d in data} == {"全線", "歐提"} and "records" not in data[0] and "id" not in data[0]
+    other = MemoryStore(tmp_path / "o.db")
+    other.learn("全線", "權限", "", 9)
+    assert other.import_(data + [{"src": "", "dst": "x"}, {"src": "同", "dst": "同"}]) == 1
+    assert other.find("全線", "權限")["records"] == [9] and other.find("歐提", "OTP")["records"] == []
+
+
+def test_history_stores_used_memories(tmp_path):
+    h = History(tmp_path)
+    rid = h.add(np.zeros(800, np.float32), mode="clean", raw="r", text="t", ok=1, memories=[3, 5])
+    assert h.get(rid)["memories"] == [3, 5]
+    h.update(rid, memories=[7])
+    assert h.get(rid)["memories"] == [7]
+    assert h.get(h.add(np.zeros(800, np.float32), mode="clean", raw="r", text="t", ok=1))["memories"] == []
+
+
+def test_api_memory_flow(tmp_path, monkeypatch):
+    """改完 → 學到 → 確認提示的動作 → 下一次整理 prompt 裡有這筆修正（假的 DGX）。"""
+    import window
+    from window import Api
+    cfg = cfg_with(vocabulary=[])
+    h, st = History(tmp_path), MemoryStore(tmp_path / "history.db")
+    sysm = type("S", (), {"text_edited": lambda self, rid, t: None, "config_changed": lambda self: None,
+                          "reveal": lambda self, p: None, "choose_file": lambda self: None})()
+    api = Api(h, lambda: cfg, config_path=tmp_path / "c.json", system=sysm, memory=st)
+    rid = h.add(np.zeros(800, np.float32), mode="clean", raw="我們用歐提登入", text="我們用歐提登入。", ok=1)
+    r = api.call("save_text", [rid, "我們用OTP登入。"])["result"]
+    [m] = r["learned"]
+    assert (m["src"], m["dst"], m["status"]) == ("歐提", "OTP", "auto") and m["suggest_vocab"] and not m["suggest_repl"]
+    assert api.call("save_text", [rid, "我們用OTP登入，好。"])["result"]["learned"] == []  # 只比這次改的地方
+
+    sent = []
+    monkeypatch.setattr(core, "chat", lambda messages, cfg, **kw: sent.append(messages) or "我們用OTP登入。")
+    out = api.call("reprocess", [rid, "clean"])["result"]
+    assert "歐提 → OTP" in sent[-1][0]["content"]
+    assert [x["dst"] for x in out["memories_used"]] == ["OTP"] and api.get(rid)["memories_used"][0]["src"] == "歐提"
+    cfg["memory_enabled"] = False
+    api.call("reprocess", [rid, "clean"])
+    assert "歐提" not in sent[-1][0]["content"]  # 關掉就不送
+    assert api.call("memory_enabled_set", [True])["result"]["memory_enabled"] is True
+
+    res = api.call("memory_set", [m["id"], "vocab"])["result"]
+    assert "OTP" in res["vocabulary"] and res["memory"]["status"] == "vocab"
+    res = api.call("memory_set", [m["id"], "repl"])["result"]
+    assert res["replacements"] == {"歐提": "OTP"} and res["memory"]["status"] == "repl"
+    api.call("memory_set", [m["id"], "off"])
+    assert cfg["replacements"] == {}  # 停用時一起拿掉它建立的規則
+    api.call("memory_set", [m["id"], "on"])
+    assert st.get(m["id"])["status"] == "auto" and st.get(m["id"])["count"] >= 1
+    assert api.call("memory_set", [999, "off"])["ok"] is False
+    assert api.call("memory_set", [m["id"], "bogus"])["ok"] is False
+    lst = api.call("memories", ["OTP", ""])["result"]
+    assert lst["enabled"] and [x["dst"] for x in lst["items"]] == ["OTP"]
+
+    # 單筆「找可能聽錯的詞」套用：使用者確認過，直接學，不經過讀音判斷
+    rid2 = h.add(np.zeros(800, np.float32), mode="clean", raw="x", text="請找小明處理", ok=1)
+    r = api.call("record_apply", [rid2, "小明", "Kevin", True])["result"]
+    assert r["learned"][0]["status"] == "repl" and st.find("小明", "Kevin")
+    one = h.add(np.zeros(800, np.float32), mode="clean", raw="x", text="權限不夠", ok=1)
+    assert api.call("record_apply", [one, "權限", "全線", False])["result"]["learned"][0]["src"] == "權限"
+
+    # 匯出／匯入
+    monkeypatch.setattr(window.Path, "home", lambda: tmp_path)
+    path = api.call("memory_export", [])["result"]
+    assert json.loads(Path(path).read_text())["memories"]
+    st.delete(st.find("歐提", "OTP")["id"])
+    assert api.call("memory_import", [path])["result"]["added"] == 1
+    assert api.call("memory_import", [])["result"] is None  # 取消選檔
+    bad = tmp_path / "bad.json"; bad.write_text("{}")
+    assert api.call("memory_import", [str(bad)])["ok"] is False
+    gone = st.find("小明", "Kevin")["id"]
+    api.call("memory_delete", [gone])
+    assert st.get(gone) is None and "小明" not in cfg["replacements"]
+
+
+def test_app_process_sends_and_records_memories(app, monkeypatch):
+    import voicetype
+    app.memory.learn("歐提", "OTP", "", 1)
+    sent = []
+    monkeypatch.setattr(voicetype, "transcribe", lambda audio, cfg: ("用歐提登入", []))
+    monkeypatch.setattr(voicetype, "llm_refine", lambda raw, mode, cfg, ctx: (sent.append(ctx) or ("用OTP登入", True)))
+    monkeypatch.setattr(voicetype, "is_too_short_or_silent", lambda a, c: False)
+    monkeypatch.setattr(voicetype, "clean_audio", lambda a, c: a)
+    monkeypatch.setattr(voicetype.macos, "paste", lambda t: None)
+    app.process(np.zeros(16000, np.float32), "clean", {})
+    assert [m["dst"] for m in sent[-1]["memories"]] == ["OTP"]
+    assert app.history.get(app.last_id)["memories"] == [app.memory.find("歐提", "OTP")["id"]]
+    app.cfg["memory_enabled"] = False
+    app.process(np.zeros(16000, np.float32), "clean", {})
+    assert sent[-1]["memories"] == [] and app.history.get(app.last_id)["memories"] == []
+
+
+def test_correction_pairs_ignores_split_rewrites():
+    # 改寫一整句時 difflib 會沿空白切成小段，合併後太長或讀音不同就不算聽錯（實際紀錄）
+    assert core.correction_pairs("功能更新，並記得先到 D M D 板", "功能更新，更新 .md 檔案") == []
+    assert [p[:2] for p in core.correction_pairs("歐提和雷特", "OTP和Redis")] == [("歐提", "OTP"), ("雷特", "Redis")]
+    assert core.correction_pairs("用 D 檔", "用 .md 檔") == []  # 單一個英文字母
+    assert core.correction_pairs("我們今天", "我們明天去今天") == []  # 只有新增
+
+
+def test_memory_learn_edit_corrects_own_correction(tmp_path):
+    """實際案例：補學到「派 A → PAI」，其實是 Pi；再把 PAI 改成 Pi，應該變成「派 A → Pi」。"""
+    st = MemoryStore(tmp_path / "h.db")
+    st.backfill([{"id": 27, "edited": True, "ai_text": "剛剛委派 AGI 和派 A 群使用 Qwen", "text": "剛剛委派 AGI 和PAI 群使用 Qwen"}])
+    assert [(m["src"], m["dst"]) for m in st.list()] == [("派 A", "PAI")]
+    learned = st.learn_edit("剛剛委派 AGI 和PAI 群使用 Qwen", "剛剛委派 AGI 和Pi 群使用 Qwen", 27)
+    assert [(m["src"], m["dst"]) for m in learned] == [("派 A", "Pi")]
+    assert [(m["src"], m["dst"], m["count"]) for m in st.list()] == [("派 A", "Pi", 1)]
+    # 別筆紀錄也學過「派 A → PAI」時只扣這一次，不整筆刪掉
+    st.learn("派 A", "PAI", "", 30); st.learn("派 A", "PAI", "", 27)
+    st.learn_edit("和PAI 群", "和Pi 群", 27)
+    assert st.find("派 A", "PAI")["count"] == 1 and st.find("派 A", "Pi")["count"] == 2
+    # 不同紀錄裡的 PAI → Pi 是一般的修正
+    assert [(m["src"], m["dst"]) for m in st.learn_edit("用PAI 跑", "用Pi 跑", 99)] == [("PAI", "Pi")]

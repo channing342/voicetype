@@ -48,6 +48,8 @@ DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=fals
 
 多語系（zh-TW／en／ko／ja／vi／th）：使用者看得到的字串一律走 `t()`，新增字串要同時加到**所有語系**，否則測試會失敗。Python 端在 `i18n.py`（選單列、通知、`hud`、`Api` 的錯誤訊息），管理介面在 `ui/i18n.js`（靜態文字用 `data-i18n`／`data-i18n-placeholder`／`data-i18n-title`，動態文字用 `t()`）；`ui/index.html` 不可出現中日韓文字（註解除外，有測試檢查）。LLM prompt、日誌、註解不翻譯。語系由 `core.resolve_lang(cfg["ui_lang"], macos.system_language())` 決定，`App.load_cfg`／`set_cfg` 與 `Api.ui_lang_set` 呼叫 `i18n.set_lang`；`i18n` 的目前語系是全域狀態，跟著 `t()` 在任何執行緒讀取。`MODE_NAMES` 等對照表是 `i18n.Labels`，取值時才翻譯，不要在 import 時把翻譯結果存成常數。測試有 autouse fixture 固定成 zh-TW。
 
+記憶（`memory.MemoryStore`，`history.db` 的 `memories` 表）：`Api.save_text` 比對「這次儲存前 → 儲存後」（不是 `ai_text` → `text`，否則分次修改會重複計算），交給 `MemoryStore.learn_edit`。判斷是不是聽錯在 `core.correction_pairs`／`is_mishearing`（純函式，拼音用 `pypinyin`）；改回去的偵測用沒過濾的 `diff_pairs`，因為英文改回中文通不過讀音判斷。同一筆紀錄裡改的是既有記憶的正確寫法（先學「派 A → PAI」再把 PAI 改成 Pi）時改目標（`_retarget`），不學「PAI → Pi」。`record_apply`（使用者確認過）直接 `learn`，不經過判斷。整理時 `MemoryStore.pick` → `core.pick_memories` 挑最多 15 筆放進 `ctx["memories"]`，由 `build_messages` 加進 system prompt；`App.process` 與 `Api.reprocess` 都要做，並把 id 存進紀錄的 `memories` 欄位。狀態 `repl` 的記憶不送（替換規則之後一定會套用），從 `repl` 改成別的狀態或刪除時要一起拿掉它建立的規則（`Api._drop_rule`）。`suggest_corrections` 只比對「辨識原文 → DGX 輸出」，手動修改歸記憶管。
+
 **改 `DEFAULTS["prompts"]` 時**：先把改之前每個 prompt 的 sha1 前 12 碼加進 `core.OLD_PROMPTS`。設定檔存的是完整 prompt，會蓋過預設；`load_config` 只會把 hash 在 `OLD_PROMPTS` 裡（使用者沒改過的舊版預設）的換成新版。漏加的話新 prompt 到不了使用者手上（第二版的自我修正就這樣漏了一陣子）。
 
 翻譯浮動視窗 `TranslatePanel._render`：先設定視窗大小，再擺子元件；反過來 autoresizing 會把元件再位移一次。拖移與邊緣縮放都在 `Background.mouseDown_`（邊緣 6px 縮放、其他地方 `performWindowDragWithEvent_`），不要改回 `movableByWindowBackground`，否則邊緣收不到滑鼠事件。
@@ -56,7 +58,7 @@ DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=fals
 
 - `NSObject`／`NSView` 子類裡的 Python 輔助方法若有參數，名稱會被當成 selector 而在 class 定義時報 `BadPrototypeError`，要加 `@objc.python_method`。
 - Accessory App（無 Dock 圖示）沒有主選單，WKWebView 內 ⌘C/⌘V 依賴 `App._edit_menu` 建的 Edit 選單。
-- WKWebView 不實作 `WKUIDelegate`，頁面的 `confirm()`／`alert()` 不會出現；UI 用二次點擊確認。
+- WKWebView 不實作 `WKUIDelegate`，頁面的 `confirm()`／`alert()` 不會出現；UI 用二次點擊確認。`<input type=file>` 也打不開，選檔由 Python 端 `App.choose_file`（主執行緒 `NSOpenPanel`）處理。
 
 ## 測試與驗證
 

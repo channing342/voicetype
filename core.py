@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+from pypinyin import lazy_pinyin
 
 from i18n import Labels, t
 
@@ -92,7 +93,8 @@ DEFAULTS = {
     "history_days": 30,
     "mic": "auto",  # auto：避開藍牙／iPhone／虛擬裝置；system：跟系統預設；其他值是指定裝置的 UID
     "mic_name": "",  # 指定裝置的名稱：沒接上時提示「找不到○○」用
-    "ignored_corrections": [],  # 在「從紀錄找聽錯的詞」按過忽略的「原文→修正」
+    "ignored_corrections": [],  # 在「DGX 常改掉的詞」按過忽略的「原文→修正」
+    "memory_enabled": True,  # 整理時把學到的修正（記憶）送給 DGX 參考；關掉仍會繼續學
     "hud_style": "classic",
     "theme": "system",  # system／light／dark：管理介面與翻譯浮動視窗共用
     "context": {"clipboard": False, "input_field": False},
@@ -381,6 +383,8 @@ def build_messages(text, mode, cfg, ctx=None):
           if ctx.get(k)]
     if bg:
         system.append("背景資訊（僅供判斷用詞，不要輸出）：\n" + "\n".join(bg))
+    if ctx.get("memories"):
+        system.append(memory_prompt(ctx["memories"]))
     user = f"選取的文字：\n{ctx.get('selection', '')}\n\n語音指令：\n{text}" if mode == "edit" else text
     return [{"role": "system", "content": "\n\n".join(system)}, {"role": "user", "content": user}]
 
@@ -472,26 +476,116 @@ def diff_pairs(before, after):
 
 
 def suggest_corrections(records, cfg):
-    """跨紀錄統計聽錯的詞。只用清理模式（其他模式會改寫或翻譯，比對沒有意義）加上使用者手動改過的地方。
-    回傳 [{src, dst, count, example, manual}]，次數多的在前；已有替換規則或按過忽略的不列。"""
+    """跨紀錄統計 DGX 常改掉的詞（待使用者確認）。只用清理模式（其他模式會改寫或翻譯，比對沒有意義），
+    比對「辨識原文 → DGX 輸出」；使用者手動改的地方由記憶（memory.MemoryStore）負責。
+    回傳 [{src, dst, count, example}]，次數多的在前；已有替換規則或按過忽略的不列。"""
     ignored = set(cfg["ignored_corrections"])
     found = {}
     for r in records:
-        pairs, ai = [], r.get("ai_text")
-        if r["mode"] == "clean":
-            pairs += [(p, False) for p in diff_pairs(r["raw"], ai if ai is not None else r["text"])]
-        if r.get("edited") and ai is not None:
-            pairs += [(p, True) for p in diff_pairs(r["ai_text"], r["text"])]
-        for (src, dst), manual in pairs:
+        if r["mode"] != "clean":
+            continue
+        ai = r.get("ai_text")
+        for src, dst in diff_pairs(r["raw"], ai if ai is not None else r["text"]):
             if src in cfg["replacements"] or f"{src}→{dst}" in ignored:
                 continue
-            item = found.setdefault((src, dst), {"src": src, "dst": dst, "count": 0, "example": "", "manual": False})
+            item = found.setdefault((src, dst), {"src": src, "dst": dst, "count": 0, "example": ""})
             item["count"] += 1
-            item["manual"] |= manual
             if not item["example"]:
-                i = (r["text"] or "").find(dst)
-                item["example"] = (r["text"] or "")[max(0, i - 15):i + len(dst) + 15] if i >= 0 else ""
-    return sorted(found.values(), key=lambda x: (-x["count"], -x["manual"], x["src"]))
+                item["example"] = snippet(r["text"], dst)
+    return sorted(found.values(), key=lambda x: (-x["count"], x["src"]))
+
+
+def snippet(text, word, pad=15):
+    """text 裡 word 前後各 pad 個字；找不到回傳空字串。"""
+    text = text or ""
+    i = text.find(word)
+    return text[max(0, i - pad):i + len(word) + pad] if i >= 0 else ""
+
+
+# ---------- 記憶：從使用者手動修正學到的「聽錯 → 正確」 ----------
+
+CJK = re.compile(r"[\u4e00-\u9fff]")
+MAX_LEARN_WORDS = 8  # 修正前後各最多幾個「詞」（中文一個字、英文一個單字），再長就是改寫
+# 讀音相似度門檻：中文比拼音；英文只能比拼字，聽錯時拼字常差很多（Istio → SQLite 約 0.36），門檻放低
+SOUND_SIMILAR, SPELLING_SIMILAR = 0.5, 0.3
+MEMORY_LIMIT = 15  # 每次整理最多送幾筆記憶給 DGX
+
+
+def phonetic(text):
+    """中文轉無聲調拼音、英文轉小寫，只留字母數字；用來比較讀音是否相近。"""
+    return "".join(lazy_pinyin(re.sub(r"[^\w]", "", text or ""))).lower()
+
+
+def is_mishearing(src, dst):
+    """短、而且讀音相近或中文改成英文（歐提 → OTP）的才算聽錯；其他是改寫。"""
+    if not src or not dst or src == dst:
+        return False
+    words = lambda s: len([x for x in TOKEN.findall(s) if not x.isspace() and NOISE.sub("", x)])
+    if words(src) > MAX_LEARN_WORDS or words(dst) > MAX_LEARN_WORDS:
+        return False
+    if CJK.search(src) and not CJK.search(dst) and re.search(r"[A-Za-z]", dst):
+        return True
+    a, b = phonetic(src), phonetic(dst)
+    limit = SOUND_SIMILAR if CJK.search(src + dst) else SPELLING_SIMILAR
+    return bool(a and b) and difflib.SequenceMatcher(None, a, b).ratio() >= limit
+
+
+def change_regions(a, b):
+    """difflib 的差異區段，中間只隔空白、標點或一個英數字詞的相鄰改動併成一段：
+    改寫一整句時 difflib 會沿著空白切成好幾個小改動，分開看每段都很短，會被誤當成聽錯。"""
+    regions = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            gap = a[i1:i2]
+            if regions and (not NOISE.sub("", "".join(gap)) or (len(gap) == 1 and not CJK.search(gap[0]))):
+                regions[-1][4] = True  # 可以跟下一段合併
+            elif regions:
+                regions[-1][4] = False
+            continue
+        if regions and regions[-1][4]:
+            regions[-1][1], regions[-1][3], regions[-1][4] = i2, j2, False
+        else:
+            regions.append([i1, i2, j1, j2, False])
+    return [(i1, i2, j1, j2) for i1, i2, j1, j2, _ in regions]
+
+
+def correction_pairs(before, after):
+    """手動修改前後的差異 → [(聽錯, 正確, 例句)]，只留 is_mishearing 的。
+    兩邊都只有一個中文字（設定擋 → 設定檔）時多帶前一個字（沒有就帶後一個），單字的記憶沒辦法判斷用在哪裡。"""
+    a, b = TOKEN.findall(before or ""), TOKEN.findall(after or "")
+    out = []
+    for i1, i2, j1, j2 in change_regions(a, b):
+        if i1 == i2 or j1 == j2:  # 只有新增或刪除：不是聽錯
+            continue
+        if i2 - i1 == 1 and j2 - j1 == 1 and CJK.fullmatch(a[i1]) and CJK.fullmatch(b[j1]):
+            if i1 > 0 and CJK.fullmatch(a[i1 - 1]):
+                i1, j1 = i1 - 1, j1 - 1
+            elif i2 < len(a) and CJK.fullmatch(a[i2]):
+                i2, j2 = i2 + 1, j2 + 1
+        src, dst = "".join(a[i1:i2]).strip(), "".join(b[j1:j2]).strip()
+        if NOISE.sub("", src) == NOISE.sub("", dst):
+            continue
+        if not CJK.search(src) and len(NOISE.sub("", src)) < 2:  # 單一個英文字母或數字，比對不出意思
+            continue
+        if is_mishearing(src, dst):
+            out.append((src, dst, snippet(after, dst)))
+    return out
+
+
+def pick_memories(raw, memories, limit=MEMORY_LIMIT):
+    """挑這次要送給 DGX 的記憶：聽錯的詞出現在辨識原文的優先，再來是讀音出現在原文裡的，最後依次數補滿。
+    memories：[{id, src, dst, example, count, last_used}]（已排除停用的）。"""
+    sound = phonetic(raw)
+    def rank(m):
+        hit = 2 if m["src"] in (raw or "") else 1 if (p := phonetic(m["src"])) and p in sound else 0
+        return (-hit, -m["count"], -(m.get("last_used") or 0))
+    return sorted(memories, key=rank)[:limit]
+
+
+def memory_prompt(memories):
+    lines = [f"- {m['src']} → {m['dst']}" + (f"（例句：{m['example']}）" if m.get("example") else "") for m in memories]
+    return ("使用者以前手動修正過的辨識錯誤（左邊是聽錯的寫法）。逐字稿出現相同或發音相近的詞時，"
+            "依上下文判斷是否改成右邊的寫法；同一個詞有多種寫法時選最符合上下文的：\n" + "\n".join(lines))
 
 
 def parse_json_list(out):
