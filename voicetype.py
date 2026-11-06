@@ -1,4 +1,5 @@
 """Voicetype：本地語音輸入。快捷鍵錄音 → mlx 辨識 → DGX LLM 整理 → 貼到目前 App。"""
+import contextlib
 import json
 import os
 import queue
@@ -12,6 +13,8 @@ import Quartz
 import rumps
 from AppKit import NSApplication, NSMenu, NSMenuItem, NSSound
 from pynput import keyboard
+from pynput._util.darwin import keycode_context
+from pynput.keyboard import _darwin as pynput_darwin
 from PyObjCTools import AppHelper
 
 import macos
@@ -251,6 +254,10 @@ class App(rumps.App):
         if self.listener is not None:
             self.listener.stop()
         self.tap_disabled = False
+        # macOS 26+ 的 TIS 輸入法 API 只能在主執行緒呼叫，pynput 卻在 listener 執行緒裡讀（重建時 SIGTRAP 當掉）；
+        # 這裡在主執行緒先讀好再塞給它。ponytail: 換鍵盤配置要等下次重建才更新，intercept 只看 keycode 不受影響
+        with keycode_context() as ctx:
+            pynput_darwin.keycode_context = lambda: contextlib.nullcontext(ctx)
         self.listener = keyboard.Listener(darwin_intercept=self.intercept)
         self.listener.start()
 

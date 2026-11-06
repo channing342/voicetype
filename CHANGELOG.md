@@ -2,6 +2,11 @@
 
 版本號是「主.次」兩段數字（寫在 `pyproject.toml`）：每次發布次版號 +1；設定檔不相容或大改版時主版號 +1、次版號歸 0。v1.0 之前的紀錄以日期標示。
 
+## v1.3（2026-11-07）：修正重建快捷鍵攔截時當掉
+
+### 修正
+- **重建快捷鍵攔截時 App 直接結束**：快捷鍵攔截（event tap）被系統停用後，`watch_listener` 會重建 pynput listener，但 pynput 在 listener 執行緒裡呼叫 TIS 輸入法 API（`TSMCurrentKeyboardInputSourceRefCreate`），新版 macOS 規定只能在主執行緒呼叫，程式收到 SIGTRAP 當掉（日誌最後是「重新建立快捷鍵攔截」加上 `resource_tracker` 警告）。`start_listener` 改在主執行緒先讀好鍵盤配置，再替換 pynput 的 `keycode_context`。中途換鍵盤配置要等下次重建才更新；快捷鍵只比 keycode，不受影響。
+
 ## v1.2（2026-10-25）：記憶：從手動修正學習
 
 以前在歷史紀錄手動修正聽錯的詞，只改了那一筆，軟體和 DGX 都沒有學到；要到詞彙頁按「開始分析」再逐筆加入才會生效。這一版把手動修正直接變成記憶，下一次整理就會用上。

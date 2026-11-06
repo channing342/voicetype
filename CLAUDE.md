@@ -25,7 +25,7 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 模組分層：`core`（純邏輯，不 import AppKit）→ `macos` / `history` / `hud` / `window`（各自包一塊系統功能）→ `voicetype.App`（rumps）串起全部。import `voicetype` 不會啟動 App，測試用 `object.__new__(App)` 塞入需要的屬性，直接測方法（見 `test_voicetype.py` 的 `app` fixture）。
 
 執行緒模型（改動時最容易出錯）：
-- **event tap 執行緒**（`App.intercept`）：必須立即返回，否則 macOS 停用 tap 且 pynput 不會重新啟用。沒有「輔助使用」權限時 pynput 建不了 tap，執行緒直接結束且不報錯；`App.watch_listener`（tick 每 2 秒）在授權後或收到 tap 停用事件時重建 listener，管理介面用 `listener.is_alive()` 判斷快捷鍵是否生效。回傳 `None` 吞掉按鍵。不可開關麥克風（實測 0.07–1.4 秒）、不可做 AX 讀取、寫檔或碰 UI（含選單、通知）；UI 相關用 `AppHelper.callAfter` 回主執行緒，其他丟到短命執行緒。
+- **event tap 執行緒**（`App.intercept`）：必須立即返回，否則 macOS 停用 tap 且 pynput 不會重新啟用。沒有「輔助使用」權限時 pynput 建不了 tap，執行緒直接結束且不報錯；`App.watch_listener`（tick 每 2 秒）在授權後或收到 tap 停用事件時重建 listener，管理介面用 `listener.is_alive()` 判斷快捷鍵是否生效。`start_listener` 必須在主執行緒呼叫：它先讀好鍵盤配置再替換 `pynput.keyboard._darwin.keycode_context`，因為 TIS 輸入法 API 在背景執行緒呼叫會 SIGTRAP 當掉；不要拿掉。回傳 `None` 吞掉按鍵。不可開關麥克風（實測 0.07–1.4 秒）、不可做 AX 讀取、寫檔或碰 UI（含選單、通知）；UI 相關用 `AppHelper.callAfter` 回主執行緒，其他丟到短命執行緒。
 - **主執行緒**（rumps `Timer` → `tick`）：所有 UI 更新（選單列 title、`Hud`）只在這裡。活動中 30fps、閒置 0.5 秒，切換頻率時重建 Timer。
 - **單一 worker 執行緒**（`App.worker` + `self.jobs`）：MLX GPU stream 綁執行緒，**所有 `transcribe` 都必須在這條**，含啟動預熱（`mode=None` 的 job）。
 - `Recorder(choose)`：`_start` 每次都 `sd._terminate()/_initialize()` 重讀 PortAudio 裝置清單（實測約 4ms；PortAudio 只在初始化時讀一次），再呼叫 `choose(sd)`（`App.choose_mic` → `core.pick_input` + `macos.input_devices()` 的 CoreAudio 清單，含 UID 與 transport）取得裝置。

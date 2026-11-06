@@ -1863,3 +1863,16 @@ def test_memory_learn_edit_corrects_own_correction(tmp_path):
     assert st.find("派 A", "PAI")["count"] == 1 and st.find("派 A", "Pi")["count"] == 2
     # 不同紀錄裡的 PAI → Pi 是一般的修正
     assert [(m["src"], m["dst"]) for m in st.learn_edit("用PAI 跑", "用Pi 跑", 99)] == [("PAI", "Pi")]
+
+
+def test_start_listener_reads_input_source_on_main_thread(app, monkeypatch):
+    """pynput 的 listener 執行緒不可呼叫 TIS API（macOS 26+ 會 SIGTRAP），要用主執行緒預先讀好的值。"""
+    import voicetype
+    monkeypatch.setattr(voicetype.pynput_darwin, "keycode_context", voicetype.pynput_darwin.keycode_context)
+    monkeypatch.setattr(voicetype.keyboard, "Listener", lambda **kw: type("L", (), {"start": lambda s: None})())
+    app.listener = None
+    app.start_listener()
+    out = []
+    t = threading.Thread(target=lambda: out.append(voicetype.pynput_darwin.keycode_context().__enter__()))
+    t.start(); t.join()
+    assert out and out[0][1]  # 拿到 layout data，且沒在背景執行緒當掉
