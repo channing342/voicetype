@@ -30,6 +30,7 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 - **單一 worker 執行緒**（`App.worker` + `self.jobs`）：MLX GPU stream 綁執行緒，**所有 `transcribe` 都必須在這條**，含啟動預熱（`mode=None` 的 job）。
 - `Recorder(choose)`：`_start` 每次都 `sd._terminate()/_initialize()` 重讀 PortAudio 裝置清單（實測約 4ms；PortAudio 只在初始化時讀一次），再呼叫 `choose(sd)`（`App.choose_mic` → `core.pick_input` + `macos.input_devices()` 的 CoreAudio 清單，含 UID 與 transport）取得裝置。
 - `Recorder.start/stop` 立即回傳 Future，實際工作在 Recorder 自己的單一執行緒依呼叫順序執行。不要改回「各開一條執行緒 + 鎖」：鎖不保證先後，Esc 太快時麥克風會關不掉。
+- 潤飾英文（編輯快捷鍵連按兩下）：`KeyLogic.down` 回傳 `"double"` 時 intercept 停掉剛開始的錄音、狀態設 `busy`，開短命執行緒跑 `App.polish_selection`（讀選取 → `core.polish` → 貼上），結束時改回 `idle`；不經 worker、不寫歷史。
 - 選取翻譯（⌘'）不走錄音狀態機：intercept 開短命執行緒跑 `App.translate_selection`（讀選取可能要 ⌘C）→ `core.translate` → 用 `AppHelper.callAfter` 更新 `hud.TranslatePanel`。`tr_seq` 丟掉過時的結果；`TranslatePanel.shown` 為 True 時 intercept 才攔截 Esc。浮動視窗是 nonactivating panel，按「取代選取」時 ⌘V 會回到原本的 App。
 - AX：macOS 27 的 system-wide `AXFocusedUIElement` 常回 -25204，`macos.focused_element` 會改問最前面的 App；不要拿掉這個退路，否則讀選取永遠落到 ⌘C。
 - `_finish` 會 `join` 讀情境的執行緒，避免短錄音拿不到選取文字。開始錄音時只用 AX 讀選取文字；結束時的模式是編輯且 AX 讀不到，才在 `_finish` 用 ⌘C 退路。

@@ -2,7 +2,14 @@
 
 版本號是「主.次」兩段數字（寫在 `pyproject.toml`）：每次發布次版號 +1；設定檔不相容或大改版時主版號 +1、次版號歸 0。v1.0 之前的紀錄以日期標示。
 
-## v1.3（2026-11-07）：修正重建快捷鍵攔截時當掉
+## v1.4（2026-11-08）：連按兩下 ⌘; 潤飾英文
+
+### 新增
+- **潤飾英文**：選取英文後快速連按兩下編輯快捷鍵（預設 ⌘;，按住 ⌘ 連按 ;），不用說話，DGX 直接把文法、時態、冠詞、用字改成自然的英文並取代選取的文字。保留原本的語氣、程式碼、路徑、URL、Markdown 與條列；夾雜的中文翻成英文；撇號用直引號，貼進終端機或程式碼不會出問題。新 prompt `prompts.polish`，詞彙表會一併帶入。
+- 連按判斷在 `core.KeyLogic`：開始錄音後 0.35 秒內再按同一個模式回傳 `"double"`；編輯模式丟掉剛開始的錄音、改跑 `App.polish_selection`，其他模式維持原本的結束錄音。
+- 沒有錄音，所以不寫歷史紀錄；DGX 失敗時不貼上，選取的文字保持原樣。
+
+2026-11-07）：修正重建快捷鍵攔截時當掉
 
 ### 修正
 - **重建快捷鍵攔截時 App 直接結束**：快捷鍵攔截（event tap）被系統停用後，`watch_listener` 會重建 pynput listener，但 pynput 在 listener 執行緒裡呼叫 TIS 輸入法 API（`TSMCurrentKeyboardInputSourceRefCreate`），新版 macOS 規定只能在主執行緒呼叫，程式收到 SIGTRAP 當掉（日誌最後是「重新建立快捷鍵攔截」加上 `resource_tracker` 警告）。`start_listener` 改在主執行緒先讀好鍵盤配置，再替換 pynput 的 `keycode_context`。中途換鍵盤配置要等下次重建才更新；快捷鍵只比 keycode，不受影響。

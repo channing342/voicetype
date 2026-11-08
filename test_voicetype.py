@@ -135,6 +135,17 @@ def test_keylogic_hold_to_talk():
     assert k.up(43, 2.1, recording=False, mode="clean") is None  # 同一次放開不會重複觸發
 
 
+def test_keylogic_double_tap():
+    k = core.KeyLogic(0.4)
+    k.down("edit", 41, 0.0, recording=False)
+    k.up(41, 0.05, recording=True, mode="edit")
+    assert k.down("edit", 41, 0.2, recording=True) == ("double", "edit")
+    k.down("edit", 41, 1.0, recording=False)
+    assert k.down("edit", 41, 1.5, recording=True) == ("stop", "edit")  # 超過連按時間：一般結束
+    k.down("clean", 43, 2.0, recording=False)
+    assert k.down("edit", 41, 2.1, recording=True) == ("stop", "edit")  # 不同模式不算連按
+
+
 def test_too_short_or_silent():
     cfg = core.DEFAULTS
     t = np.arange(core.SAMPLE_RATE) / core.SAMPLE_RATE
@@ -282,6 +293,17 @@ def test_translate_prompts_timeout_truncation_and_failure():
     assert core.translate("hello there friend", cfg_with(llm_url=slow.url, llm_timeout=1))[1] is True
     slow.shutdown()
     assert core.translate("hello", cfg_with(llm_url="http://127.0.0.1:1/x")) == ("", False, False)
+
+
+def test_polish_prompt_vocab_and_failure():
+    srv = fake_llm(0, "I fixed the bug yesterday.")
+    cfg = cfg_with(llm_url=srv.url, llm_timeout=1)
+    assert core.polish("I already fix the bug yesterday", cfg) == ("I fixed the bug yesterday.", True)
+    system = srv.body["messages"][0]["content"]
+    assert system.startswith(core.DEFAULTS["prompts"]["polish"]) and "Terraform" in system
+    assert srv.body["messages"][1]["content"] == "I already fix the bug yesterday"
+    srv.shutdown()
+    assert core.polish("hello", cfg_with(llm_url="http://127.0.0.1:1/x")) == ("", False)
 
 
 def test_build_messages_english_mode_uses_style():
@@ -1248,6 +1270,36 @@ def test_app_translate_hotkey_and_esc(app, now_main, monkeypatch):
     assert app.intercept(*key_event(core.KEY_ESC, 0)) is not None  # 視窗沒開：Esc 照常傳給 App
     app.tpanel.shown = True
     assert app.intercept(*key_event(core.KEY_ESC, 0)) is None and app.tpanel.calls == [("hide",)]
+
+
+def test_app_edit_double_tap_polishes_selection(app, monkeypatch):
+    import voicetype
+    called = threading.Event()
+    monkeypatch.setattr(app, "start", lambda m: setattr(app, "state", "recording"))
+    monkeypatch.setattr(app, "polish_selection", called.set)
+    cmd = core.MOD_FLAGS["cmd"]
+    assert app.intercept(*key_event(41, cmd)) is None and app.state == "recording"
+    app.intercept(*key_event(41, cmd, down=False))
+    assert app.intercept(*key_event(41, cmd)) is None
+    assert called.wait(1) and app.state == "busy" and app.rec.calls == ["stop"]  # 剛開始的錄音丟掉，不送辨識
+    assert app.jobs.empty()
+
+
+def test_app_polish_selection_flow(app, monkeypatch):
+    import voicetype
+    pasted = []
+    monkeypatch.setattr(voicetype.macos, "paste", pasted.append)
+    monkeypatch.setattr(voicetype.macos, "read_selection", lambda: "  i has a apple ")
+    monkeypatch.setattr(voicetype, "polish", lambda text, cfg: ("I have an apple." if text == "i has a apple" else "", True))
+    app.state = "busy"
+    app.polish_selection()
+    assert pasted == ["I have an apple."] and app.last_text == "I have an apple." and app.state == "idle"
+    monkeypatch.setattr(voicetype, "polish", lambda text, cfg: ("", False))
+    app.polish_selection()  # DGX 失敗：不貼上
+    assert pasted == ["I have an apple."] and "DGX" in app.flash[0]
+    monkeypatch.setattr(voicetype.macos, "read_selection", lambda: "")
+    app.polish_selection()
+    assert app.flash[0] == "編輯模式需要先選取文字" and app.state == "idle"
 
 
 def test_app_translate_selection_flow(app, now_main, monkeypatch):

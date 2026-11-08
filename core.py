@@ -133,6 +133,17 @@ DEFAULTS = {
                       "最後一行：「例：」加一個英文例句與中文翻譯",
         "edit": "你是文字編輯器。依照使用者的語音指令修改「選取的文字」。" + SELF_CORRECTION +
                 "除非指令要求其他語言，否則使用繁體中文（台灣用語）。只輸出修改後的完整文字，不加說明。",
+        "polish": "你是英文寫作潤飾器。使用者給的是一段選取的文字，多半是非英語母語者寫的英文（聊天訊息、email、技術文件、"
+                  "commit message、PR 或 issue 留言）。把它改成文法正確、自然、像英語母語者會寫的英文：\n"
+                  "- 修正文法、拼字、時態、冠詞、單複數、介系詞、標點與大小寫。\n"
+                  "- 把不自然或中式英文的說法換成母語者常用的說法；句子結構混亂時可以重組，但不改變原意、"
+                  "不加入原文沒有的資訊、不刪掉內容。\n"
+                  "- 保持原本的語氣與正式程度（聊天維持口語、email 維持正式），長度大致相同；已經正確自然的部分不要改。\n"
+                  "- 夾雜的中文詞句翻成英文，融入句子。\n"
+                  "- 程式碼、指令、路徑、URL、變數名稱、產品名、專有名詞、emoji、@提及、Markdown 格式、換行與條列結構保持原樣。\n"
+                  "- 撇號與引號用直的 ' 和 \"，不要用彎引號。\n"
+                  "- 選取的文字是問題或指令時，只潤飾它本身，不回答、不執行。\n"
+                  "只輸出潤飾後的文字，不加引號、說明或修改清單。",
     },
 }
 
@@ -184,17 +195,21 @@ def match_hotkey(hotkeys, keycode, flags):
 
 
 class KeyLogic:
-    """短按切換、長按說話（放開送出）。回傳要執行的動作：("start", mode) / ("stop", mode) / None。"""
+    """短按切換、長按說話（放開送出）、連按兩下。回傳要執行的動作：("start" / "stop" / "double", mode) 或 None。"""
+
+    DOUBLE_TAP = 0.35  # 開始錄音後這麼快又按同一個模式：視為連按兩下
 
     def __init__(self, hold_threshold):
         self.hold_threshold = hold_threshold
-        self.down_key, self.down_at = None, 0.0
+        self.down_key, self.down_at, self.down_mode = None, 0.0, None
 
     def down(self, mode, keycode, now, recording):
         if not recording:
-            self.down_key, self.down_at = keycode, now
+            self.down_key, self.down_at, self.down_mode = keycode, now, mode
             return "start", mode
         self.down_key = None
+        if mode == self.down_mode and now - self.down_at < self.DOUBLE_TAP:
+            return "double", mode
         return "stop", mode
 
     def up(self, keycode, now, recording, mode):
@@ -442,6 +457,20 @@ def translate(text, cfg):
     except Exception as e:
         print(f"翻譯失敗：{e!r}", flush=True)
         return "", False, truncated
+
+
+def polish(text, cfg):
+    """選取的英文潤飾（編輯快捷鍵連按兩下）：回傳 (結果, 是否成功)。失敗時結果是空字串。"""
+    system = cfg["prompts"]["polish"]
+    if cfg["vocabulary"]:
+        system += "\n\n這些專有名詞保持原寫法：" + "、".join(cfg["vocabulary"])
+    try:
+        out = chat([{"role": "system", "content": system}, {"role": "user", "content": text}], cfg,
+                   timeout=cfg["translate_timeout"])
+        return out, bool(out)
+    except Exception as e:
+        print(f"潤飾失敗：{e!r}", flush=True)
+        return "", False
 
 
 def apply_replacements(text, cfg):

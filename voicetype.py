@@ -20,7 +20,7 @@ from PyObjCTools import AppHelper
 import macos
 from core import (VERSION, CONFIG_PATH, KEY_ESC, MOD_FLAGS, MODE_NAMES, RECORD_MODES, SAMPLE_RATE, KeyLogic, Recorder,
                   apply_replacements, clean_audio, is_too_short_or_silent, llm_refine, load_config, match_hotkey, parse_capture,
-                  mic_name, mic_options, pick_input, resolve_lang, sd_index, save_config, transcribe, translate, translate_kind, TRANSLATE_LABELS)
+                  mic_name, mic_options, pick_input, polish, resolve_lang, sd_index, save_config, transcribe, translate, translate_kind, TRANSLATE_LABELS)
 from history import History
 from llmstore import LLMStore
 from memory import MemoryStore
@@ -458,7 +458,14 @@ class App(rumps.App):
             return None
         if not repeat and self.state in ("idle", "recording"):
             action, m = self.keys.down(mode, keycode, now, self.state == "recording")
-            self.start(m) if action == "start" else self.finish(m)
+            if action == "start":
+                self.start(m)
+            elif action == "double" and m == "edit":  # 編輯連按兩下：丟掉剛開始的錄音，直接潤飾選取的英文
+                self.rec.stop()
+                self.stage, self.stage_start, self.state = "llm", now, "busy"
+                threading.Thread(target=self.polish_selection, daemon=True).start()
+            else:
+                self.finish(m)
         return None
 
     def shift_stop(self, keycode, flags):
@@ -496,6 +503,27 @@ class App(rumps.App):
 
     def retry_translate(self, source):
         threading.Thread(target=self.run_translate, args=(source, None), daemon=True).start()
+
+    def polish_selection(self):
+        """短命執行緒：讀選取（可能 ⌘C）→ DGX 潤飾 → 貼上取代。失敗不貼，選取的文字保持原樣。"""
+        try:
+            text = macos.read_selection().strip()
+            if not text:
+                self.set_flash(t("flash_edit_need_selection"), 2)
+                return
+            out, ok = polish(text, self.cfg)
+            if not ok:
+                self.set_flash(t("flash_edit_dgx_failed"), 2)
+                return
+            # ponytail: 沒有錄音，不寫歷史紀錄；要復原就在原 App 按 ⌘Z
+            self.last_text = out
+            macos.paste(out)
+            self.set_flash(t("flash_pasted"), 0.8)
+        except Exception as e:
+            print(f"潤飾失敗：{e!r}", flush=True)
+            self.set_flash(t("flash_process_failed", error=type(e).__name__), 2)
+        finally:
+            self.state = "idle"
 
     def replace_selection(self, text):
         """翻譯視窗不會讓 Voicetype 變成使用中的 App，⌘V 會貼回原本的選取。"""
