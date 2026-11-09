@@ -1083,7 +1083,7 @@ def app(tmp_path, monkeypatch):
                            "visible": lambda self: False})()
     a.listener, a.tap_disabled, a.tap_checked = FakeListener(), False, 0.0
     a.tpanel, a.tr_seq = FakePanel(), 0
-    a.swallow_up = None
+    a.swallow_up, a.rec_seq = None, 0
     a.last_id, a.mic_uids = None, ()
     monkeypatch.setattr(voicetype.rumps, "notification", lambda *x: a.notes.append(x))
     monkeypatch.setattr(voicetype, "save_config", lambda cfg: None)
@@ -1285,6 +1285,23 @@ def test_app_edit_double_tap_polishes_selection(app, monkeypatch):
     assert app.jobs.empty()
 
 
+def test_app_late_mic_failure_does_not_kill_next_recording(app, monkeypatch):
+    from concurrent.futures import Future
+    import voicetype
+    monkeypatch.setattr(voicetype.macos, "frontmost_context", lambda *a: {})
+    monkeypatch.setattr(voicetype.macos, "read_selection", lambda **kw: "")
+    first, second = Future(), Future()
+    pending = [first, second]
+    app.rec.start = lambda: pending.pop(0)
+    app.start("clean")
+    app.cancel("取消")  # Esc：第一輪的麥克風還沒開好
+    app.start("clean")
+    first.set_exception(OSError("mic"))  # 第一輪晚到的失敗
+    assert app.state == "recording"
+    second.set_exception(OSError("mic"))  # 這一輪自己的失敗照常處理
+    assert app.state == "idle"
+
+
 def test_app_polish_selection_flow(app, monkeypatch):
     import voicetype
     pasted = []
@@ -1437,11 +1454,11 @@ def test_press_return_has_no_modifiers(monkeypatch):
 def test_app_sound_cue_and_skip(app, now_main, monkeypatch):
     played = []
     monkeypatch.setattr(app, "play_cue", lambda: played.append(1))
-    app.state = "recording"
-    app._mic_started(Done())
+    app.state, app.rec_seq = "recording", 1
+    app._mic_started(Done(), 1)
     assert played == [1]
     app.cfg["sound_cue"] = False
-    app._mic_started(Done())
+    app._mic_started(Done(), 1)
     assert played == [1]
 
     app.rec.audio = np.ones(core.SAMPLE_RATE, np.float32)

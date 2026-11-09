@@ -2083,7 +2083,7 @@ wheels = [
 
 [[package]]
 name = "voicetype"
-version = "1.4"
+version = "1.5"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptography" },

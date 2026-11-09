@@ -37,7 +37,7 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 - `window.Api` 的 `system` 就是 App（`status`、`capture`、`config_changed`、`request_permissions`、`open_privacy`、`restart`）；Api 在背景執行緒呼叫，碰選單或系統對話框的都要 `AppHelper.callAfter`。快捷鍵錄製：首頁呼叫 `capture` 設 `capturing`，下一個按鍵由 `intercept` 攔下，`save_capture` 存檔後呼叫頁面的 `captureDone()`。
 - WKWebView 的 bridge 回呼在主執行緒，`Bridge` 把 `Api.call` 丟背景執行緒（DGX 可能數秒），完成後用 `AppHelper.callAfter` 回主執行緒 `evaluateJavaScript`。
 
-狀態機：`idle → recording → busy → idle`，另有 `paused`。處理模式由**結束錄音時的快捷鍵**決定；長按放開則用開始時的模式。長按判斷在 `core.KeyLogic`，keyUp 只比 keycode（修飾鍵可能先放開）。
+狀態機：`idle → recording → busy → idle`，另有 `paused`。`state` 沒有鎖，靠「誰能從哪個狀態轉移」錯開：只有 intercept（event tap）能從 `idle`／`recording` 轉出（開始、結束、取消、連按）；進了 `busy` 之後只有接手的那條執行緒（worker、`_finish` 失敗、`polish_selection`）改回 `idle`，intercept 在 `busy` 時不動 state。新增寫入 `state` 的地方要守住這個規則。非同步回呼（如 `_mic_started`）要帶 `rec_seq` 確認還是同一輪錄音再改 state。處理模式由**結束錄音時的快捷鍵**決定；長按放開則用開始時的模式。長按判斷在 `core.KeyLogic`，keyUp 只比 keycode（修飾鍵可能先放開）。
 
 辨識引擎：`core.transcribe` 先用 `split_chunks` 把超過 30 秒的錄音切在最安靜處，每塊交給 `transcribe_chunk` 再接回文字與分段時間（加上切點位移）。`transcribe_chunk` 依 `asr_model` 分流。repo 名稱含 whisper 的走 `mlx_whisper`，其他走 `mlx_audio.stt`（Qwen3-ASR 等）。`load_asr` 同一時間只保留一個模型；切換時必須清掉 `mlx_whisper.transcribe.ModelHolder`，否則兩個模型會同時佔記憶體。輸出一律經過 OpenCC `s2tw`（不要用 `s2twp`）。切換由 `Api.asr_set` → `App.switch_asr` 在 worker 排預熱工作，狀態存在 `App.asr_state`。
 
@@ -54,6 +54,11 @@ DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=fals
 **改 `DEFAULTS["prompts"]` 時**：先把改之前每個 prompt 的 sha1 前 12 碼加進 `core.OLD_PROMPTS`。設定檔存的是完整 prompt，會蓋過預設；`load_config` 只會把 hash 在 `OLD_PROMPTS` 裡（使用者沒改過的舊版預設）的換成新版。漏加的話新 prompt 到不了使用者手上（第二版的自我修正就這樣漏了一陣子）。
 
 翻譯浮動視窗 `TranslatePanel._render`：先設定視窗大小，再擺子元件；反過來 autoresizing 會把元件再位移一次。拖移與邊緣縮放都在 `Background.mouseDown_`（邊緣 6px 縮放、其他地方 `performWindowDragWithEvent_`），不要改回 `movableByWindowBackground`，否則邊緣收不到滑鼠事件。
+
+## 已知限制（目前用量不需要處理）
+
+- `cfg` 是共享的可變 dict，管理介面存檔（`Api._save`）與選單「重新載入設定」同時發生時，其中一邊的改動會遺失。
+- `history`、`llmstore`、`memory` 各自連 `history.db`，沒有開 WAL；寫入變頻繁時可能出現 `database is locked`，到時再加 `PRAGMA journal_mode=WAL`。
 
 ## PyObjC 陷阱
 

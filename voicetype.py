@@ -61,6 +61,7 @@ class App(rumps.App):
         threading.Thread(target=lambda: self.memory.backfill(self.history.list(limit=100000)), daemon=True).start()
         self.last_id, self.mic_uids = None, ()  # last_id：最近一次貼上的紀錄；mic_uids：選單上列出的麥克風
         self.listener, self.tap_disabled, self.tap_checked = None, False, 0.0
+        self.rec_seq = 0  # 每輪錄音 +1，丟掉上一輪晚到的開麥克風結果
         self.tpanel, self.tr_seq = TranslatePanel(lambda t: macos.copy_text(t, transient=True),
                                                   self.replace_selection, self.retry_translate,
                                                   theme=lambda: self.cfg["theme"]), 0
@@ -344,11 +345,15 @@ class App(rumps.App):
         # 每次錄音用新的 dict：上一輪逾時的讀取執行緒晚到時只會寫進舊的，不會蓋掉這一輪
         self.mode, self.ctx = mode, {}
         self.state = "recording"
-        self.rec.start().add_done_callback(self._mic_started)
+        self.rec_seq += 1
+        seq = self.rec_seq  # Esc 後馬上再錄時，上一輪晚到的開麥克風失敗不可把這一輪打回 idle
+        self.rec.start().add_done_callback(lambda fut: self._mic_started(fut, seq))
         self.ctx_thread = threading.Thread(target=self.capture_context, args=(self.ctx,), daemon=True)
         self.ctx_thread.start()
 
-    def _mic_started(self, fut):
+    def _mic_started(self, fut, seq):
+        if seq != self.rec_seq:
+            return
         if fut.exception() and self.state == "recording":
             print(f"開啟麥克風失敗：{fut.exception()!r}", flush=True)
             self.set_flash(t("flash_mic_failed"), 2)
