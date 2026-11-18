@@ -2,14 +2,13 @@
 金鑰放在設定目錄的獨立檔案（權限 600），跟資料庫分開：只外流資料庫（備份、同步、傳檔）時看不到 header 值。"""
 import json
 import os
-import sqlite3
 import uuid
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from core import DEFAULT_LLM
-from history import DATA_DIR
+from history import DATA_DIR, connect
 
 KEY_PATH = Path.home() / ".config/voicetype/secret.key"
 # 舊版設定檔裡的 LLM 欄位：最早只有一組 llm_url…；鑰匙圈版是 llm_profiles + llm_profile（header 值在鑰匙圈，不搬）
@@ -47,9 +46,7 @@ class LLMStore:
 
     def _conn(self):
         # ponytail: 跟 History 一樣每次開新連線，避免跨執行緒共用
-        c = sqlite3.connect(self.db)
-        c.row_factory = sqlite3.Row
-        return c
+        return connect(self.db)
 
     def _row(self, r):
         try:

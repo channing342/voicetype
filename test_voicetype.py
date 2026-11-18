@@ -12,6 +12,7 @@ import pytest
 
 import core
 import i18n
+import history
 from history import History
 from memory import MemoryStore
 
@@ -295,6 +296,19 @@ def test_translate_prompts_timeout_truncation_and_failure():
     assert core.translate("hello", cfg_with(llm_url="http://127.0.0.1:1/x")) == ("", False, False)
 
 
+def test_chat_strips_think_block():
+    srv = fake_llm(0, "<think>\n先分析一下\n</think>\n\n整理後的文字")
+    assert core.chat([{"role": "user", "content": "x"}], cfg_with(llm_url=srv.url, llm_timeout=1)) == "整理後的文字"
+    srv.shutdown()
+
+
+def test_strip_think_edge_cases():
+    assert core.strip_think("<think>想</think>\n答案") == "答案"
+    assert core.strip_think("思考內容\n</think>\n\n答案") == "答案"  # 開頭標籤在 prompt 端
+    assert core.strip_think("<think>思考到一半被截斷") == ""  # 空字串會走原文退路
+    assert core.strip_think("  一般回答  ") == "一般回答"
+
+
 def test_polish_prompt_vocab_and_failure():
     srv = fake_llm(0, "I fixed the bug yesterday.")
     cfg = cfg_with(llm_url=srv.url, llm_timeout=1)
@@ -487,6 +501,16 @@ def test_version_single_source():
 
 
 # ---------- 歷史紀錄 ----------
+
+def test_history_db_uses_wal_for_all_stores(tmp_path):
+    from llmstore import LLMStore
+    History(tmp_path)
+    MemoryStore(tmp_path / "history.db")
+    LLMStore(tmp_path / "history.db", tmp_path / "secret.key")
+    with history.connect(tmp_path / "history.db") as c:
+        assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert c.execute("PRAGMA busy_timeout").fetchone()[0] == history.DB_TIMEOUT * 1000
+
 
 def test_history_stats(tmp_path):
     h = History(tmp_path)
@@ -1193,6 +1217,20 @@ def test_app_process_paste_and_edit_failure(app, monkeypatch):
 
     app.process(audio, "edit", {})
     assert len(app.history.list()) == 2 and "選取" in app.flash[0]
+
+
+def test_app_process_excluded_app_pastes_without_history(app, monkeypatch):
+    import voicetype
+    pasted = []
+    monkeypatch.setattr(voicetype.macos, "paste", pasted.append)
+    monkeypatch.setattr(voicetype, "transcribe", lambda audio, cfg: ("密碼是一二三", []))
+    monkeypatch.setattr(voicetype, "llm_refine", lambda *a: ("密碼是 123", True))
+    audio = 0.1 * np.ones(core.SAMPLE_RATE, np.float32)
+    app.process(audio, "clean", {"app": "1Password", "bundle": "com.1password.1password"})
+    assert pasted == ["密碼是 123"] and app.history.list() == []  # 照常貼上，文字與錄音都不存
+    assert app.last_text == ""  # 選單「重新貼上」不會把密碼貼到別的 App
+    app.process(audio, "clean", {"app": "Slack", "bundle": "com.tinyspeck.slackmacgap"})
+    assert len(app.history.list()) == 1
 
 
 def test_app_purges_history_periodically(app):

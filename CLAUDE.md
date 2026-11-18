@@ -43,7 +43,7 @@ tail -f ~/Library/Logs/voicetype.log         # LaunchAgent 模式的日誌
 
 DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=false`）。LLM 設定不在 `config.json`：多組設定存在 `history.db`（`llmstore.LLMStore`，header 以 Fernet 加密，金鑰在 `~/.config/voicetype/secret.key`），使用中那組在執行期放 `cfg["llm"]`（`RUNTIME_KEYS`，`save_config` 不寫出）。改了使用中那組要重設 `cfg["llm"]`（`Api._llm_changed`、`App.use_llm`）；`App.load_cfg` 會把舊設定檔的 LLM 欄位搬進資料庫。`llm_refine` 回傳 `(文字, 是否成功)`，失敗退回原文；編輯模式失敗時不貼上。替換規則在 LLM 之後套用。
 
-歷史紀錄欄位：`ai_text`＝手動修改前的 DGX 輸出、`edited`＝是否手動改過；新欄位加在 `history.ADDED`，舊資料庫啟動時 `ALTER TABLE` 補上。聽錯的詞：`core.suggest_corrections`（本機比對 raw→DGX 輸出、ai_text→text）與 `core.find_misheard`（DGX 單筆，`original` 不在文字裡的建議丟掉）。
+`history.db` 的連線一律用 `history.connect`（WAL、timeout 10 秒），`History`、`MemoryStore`、`LLMStore` 共用。歷史紀錄欄位：`ai_text`＝手動修改前的 DGX 輸出、`edited`＝是否手動改過；新欄位加在 `history.ADDED`，舊資料庫啟動時 `ALTER TABLE` 補上。聽錯的詞：`core.suggest_corrections`（本機比對 raw→DGX 輸出、ai_text→text）與 `core.find_misheard`（DGX 單筆，`original` 不在文字裡的建議丟掉）。
 
 設定：`DEFAULTS` 與 `config.json` 一層淺合併，`load_config` 會把新欄位寫回舊設定檔。新增設定只需加在 `DEFAULTS`。
 
@@ -58,7 +58,6 @@ DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=fals
 ## 已知限制（目前用量不需要處理）
 
 - `cfg` 是共享的可變 dict，管理介面存檔（`Api._save`）與選單「重新載入設定」同時發生時，其中一邊的改動會遺失。
-- `history`、`llmstore`、`memory` 各自連 `history.db`，沒有開 WAL；寫入變頻繁時可能出現 `database is locked`，到時再加 `PRAGMA journal_mode=WAL`。
 
 ## PyObjC 陷阱
 
@@ -68,6 +67,7 @@ DGX 呼叫統一走 `core.chat`（帶 `chat_template_kwargs.enable_thinking=fals
 
 ## 測試與驗證
 
+- 日誌（LaunchAgent 模式寫到 `~/Library/Logs/voicetype.log`，會長期留存）不可印出辨識文字、DGX 輸出、選取內容或剪貼簿；只記長度、耗時、錯誤類型。
 - 涉及按鍵注入的測試要 monkeypatch `Quartz.CGEventPost`，否則會真的貼進執行測試的終端機。
 - 驗證 `ui/index.html` 版面：用 `webview.takeSnapshotWithConfiguration_completionHandler_` 存圖。`screencapture -l` 在視窗不在最前面時會拍到空白。
 - 浮動視窗繪圖可用 `view.dataWithPDFInsideRect_` 觸發 `drawRect_`。

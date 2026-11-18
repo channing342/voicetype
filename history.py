@@ -18,6 +18,18 @@ FIELDS = ("created", "mode", "app", "bundle", "title", "duration", "raw", "text"
 ADDED = {"ai_text": "TEXT", "edited": "INTEGER DEFAULT 0", "memories": "TEXT"}
 
 
+DB_TIMEOUT = 10  # 秒：另一條連線正在寫入時等它，而不是立刻報 database is locked
+
+
+def connect(path):
+    """history.db 的連線一律走這裡（History、MemoryStore、LLMStore 共用同一個檔案）。
+    WAL 讓讀寫不互擋，多條執行緒同時寫入時靠 timeout 排隊。"""
+    c = sqlite3.connect(path, timeout=DB_TIMEOUT)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.row_factory = sqlite3.Row
+    return c
+
+
 class History:
     def __init__(self, root=DATA_DIR):
         self.root, self.audio_dir = Path(root), Path(root) / "audio"
@@ -34,9 +46,7 @@ class History:
 
     def _conn(self):
         # ponytail: 每次開新連線，避免跨執行緒共用；寫入量極小不需要連線池
-        c = sqlite3.connect(self.db)
-        c.row_factory = sqlite3.Row
-        return c
+        return connect(self.db)
 
     def wav_path(self, rid):
         return self.audio_dir / f"{rid}.wav"

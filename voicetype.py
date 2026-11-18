@@ -589,15 +589,19 @@ class App(rumps.App):
         text, ok = llm_refine(raw, mode, self.cfg, {**ctx, "memories": mems})
         t2 = time.time()
         text = apply_replacements(text, self.cfg)
+        excluded = ctx.get("bundle") in self.cfg["exclude_apps"]  # 密碼管理器等：照常貼上，不留文字與錄音
         if mode == "edit" and not ok:
             self.set_flash(t("flash_edit_dgx_failed"), 2)
         else:
-            self.last_text = text
+            if not excluded:  # 「重新貼上」也不能把密碼貼到別的 App
+                self.last_text = text
             macos.paste(text)
             if ctx.get("send"):
                 macos.press_return()
             self.set_flash((t("flash_sent") if ctx.get("send") else t("flash_pasted")) if ok else t("flash_dgx_fallback"),
                            0.8 if ok else 2)
+        if excluded:
+            return
         rid = self.history.add(audio, mode=mode, app=ctx.get("app", ""), bundle=ctx.get("bundle", ""),
                          title=ctx.get("title", ""), duration=len(audio) / SAMPLE_RATE, raw=raw, text=text,
                          segments=segments, ok=int(ok), t_transcribe=t1 - t0, t_llm=t2 - t1,

@@ -2,6 +2,20 @@
 
 版本號是「主.次」兩段數字（寫在 `pyproject.toml`）：每次發布次版號 +1；設定檔不相容或大改版時主版號 +1、次版號歸 0。v1.0 之前的紀錄以日期標示。
 
+## v1.6（2026-11-18）：密碼管理器不留紀錄、過濾思考內容
+
+參考 [Umless](https://github.com/despriber/Umless) 的做法：密碼管理器不留紀錄、過濾思考內容、SQLite 開 WAL。
+
+### 新增
+- **`exclude_apps`**：在這些 App 裡照常貼上，但不寫歷史紀錄（文字與錄音都不存）。預設包含 1Password、密碼、鑰匙圈存取、Bitwarden、KeePassXC，以 bundle id 比對；這些 App 裡說的話也不會成為選單「重新貼上」的內容。只保護本機紀錄，辨識出的文字仍會送給 DGX 整理。
+
+### 修正
+- **DGX 回應裡的 `<think>` 區塊不再貼進 App**：部分模型（Qwen3、DeepSeek-R1 等）即使送了 `enable_thinking=false` 仍可能輸出思考內容；`core.chat` 回傳前一律移除（含開頭標籤在 prompt 端、只剩結尾標籤，以及思考到一半被截斷的情況），所有 DGX 呼叫（整理、翻譯、潤飾、聽錯的詞）都受保護。
+- **`history.db` 改用 WAL、連線等待 10 秒**：`History`、`MemoryStore`、`LLMStore` 共用 `history.connect`。讀寫不再互擋；worker 存紀錄和管理介面改記憶同時寫入時，後到的一方最多等 10 秒，而不是立刻報 `database is locked`。第一次啟動會把資料庫轉成 WAL（目錄多出 `history.db-wal`、`history.db-shm`），資料不變。
+
+### 文件
+- `CLAUDE.md` 明訂日誌不可印出辨識文字、DGX 輸出、選取內容或剪貼簿。
+
 ## v1.5（2026-11-10）：修正取消後馬上再錄可能被打斷
 
 ### 修正

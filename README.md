@@ -126,6 +126,7 @@ uv run python voicetype.py   # 印出「就緒」後即可使用
 | `memory_enabled` | true | 整理時把學到的修正（記憶）送給 DGX 參考；關掉仍會繼續學。管理介面「設定」→「記憶」可以切換 |
 | `app_styles` | 郵件、聊天、終端機／IDE | 依 App 套用的語氣規則。`apps` 填 bundle id，可以用 `*` 萬用字元；`title` 填視窗標題的關鍵字 |
 | `context` | 兩項都是 `false` | `clipboard`、`input_field` 打開後，會把剪貼簿或輸入框的內容也交給 DGX |
+| `exclude_apps` | 1Password、密碼、鑰匙圈存取、Bitwarden、KeePassXC | 在這些 App（填 bundle id）裡照常貼上，但不寫歷史紀錄，文字與錄音都不存，選單「重新貼上」也拿不到；辨識出的文字仍會送給 DGX 整理。查 bundle id：`mdls -name kMDItemCFBundleIdentifier -raw /Applications/某App.app` |
 | `prompts` | | 各模式的 system prompt（固定中文，不隨介面語言改變）；`polish` 是連按兩下 ⌘; 的英文潤飾 |
 | `min_seconds`、`max_seconds`、`silence_rms` | 0.5／300／0.003 | 錄音太短、太長或幾乎沒聲音時的判斷門檻；`silence_rms` 也是去除靜音的最低門檻 |
 | `audio_cleanup` | true | 辨識前去除靜音與音量正規化；歷史紀錄存的是處理後的錄音 |

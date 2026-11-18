@@ -1,12 +1,11 @@
 """記憶：使用者手動修正學到的「聽錯 → 正確」，存在 history.db，整理時挑相關的送給 DGX 參考。
 判斷哪些修正算聽錯、挑哪些送出的純邏輯在 core（correction_pairs、pick_memories）。"""
 import json
-import sqlite3
 import time
 from pathlib import Path
 
 from core import correction_pairs, diff_pairs, pick_memories
-from history import DATA_DIR
+from history import DATA_DIR, connect
 
 # auto＝自動學到（只當 DGX 參考）；repl／vocab＝已設為替換規則／加入詞彙；off＝停用（不送給 DGX）
 STATUSES = ("auto", "repl", "vocab", "off")
@@ -25,9 +24,7 @@ class MemoryStore:
 
     def _conn(self):
         # ponytail: 跟 History 一樣每次開新連線，避免跨執行緒共用
-        c = sqlite3.connect(self.db)
-        c.row_factory = sqlite3.Row
-        return c
+        return connect(self.db)
 
     def _row(self, r):
         d = dict(r)

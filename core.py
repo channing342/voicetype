@@ -98,6 +98,9 @@ DEFAULTS = {
     "hud_style": "classic",
     "theme": "system",  # system／light／dark：管理介面與翻譯浮動視窗共用
     "context": {"clipboard": False, "input_field": False},
+    # 在這些 App（bundle id）裡照常貼上，但不寫歷史紀錄（文字與錄音都不存）
+    "exclude_apps": ["com.1password.1password", "com.apple.Passwords", "com.apple.keychainaccess",
+                     "com.bitwarden.desktop", "org.keepassxc.keepassxc"],
     # 由上往下比對，第一條符合的生效；apps 支援萬用字元（bundle id），title 為視窗標題關鍵字
     "app_styles": [
         {"name": "郵件", "apps": ["com.apple.mail", "com.microsoft.Outlook"], "title": ["Gmail", "Outlook"],
@@ -404,6 +407,17 @@ def build_messages(text, mode, cfg, ctx=None):
     return [{"role": "system", "content": "\n\n".join(system)}, {"role": "user", "content": user}]
 
 
+def strip_think(text):
+    """關掉思考的請求，部分模型（Qwen3、DeepSeek-R1 等）仍可能輸出思考內容，不能貼進使用者的 App。
+    有 </think> 就只留最後一個之後（含開頭標籤在 prompt 端、content 只有結尾標籤的情況）；
+    只有 <think>（思考到一半被截斷）就丟掉它之後的全部。"""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    elif "<think>" in text:
+        text = text.split("<think>", 1)[0]
+    return text.strip()
+
+
 def chat(messages, cfg, timeout=None, profile=None):
     """profile 預設用使用中那組（cfg["llm"]）；測試連線會直接傳表單上還沒儲存的值。"""
     profile = profile or cfg["llm"]
@@ -412,7 +426,8 @@ def chat(messages, cfg, timeout=None, profile=None):
     hdrs = {"Content-Type": "application/json", **profile["headers"]}
     req = urllib.request.Request(profile["url"], json.dumps(body).encode(), hdrs)
     with urllib.request.urlopen(req, timeout=timeout or profile["timeout"]) as r:
-        return json.load(r)["choices"][0]["message"]["content"].strip()
+        content = json.load(r)["choices"][0]["message"]["content"] or ""
+    return strip_think(content)
 
 
 def llm_refine(text, mode, cfg, ctx=None):
